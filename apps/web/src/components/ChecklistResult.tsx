@@ -172,15 +172,15 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           <PrazoItem
             label="Enviar proposta até"
-            value={formatPrazo(data.prazos.enviarPropostaAte) || data.prazos.proposta}
+            value={(formatPrazo(data.prazos.enviarPropostaAte) || data.prazos.proposta) ?? ""}
           />
           <PrazoItem
             label="Esclarecimentos até"
-            value={formatPrazo(data.prazos.esclarecimentosAte) || data.prazos.esclarecimentos}
+            value={(formatPrazo(data.prazos.esclarecimentosAte) || data.prazos.esclarecimentos) ?? ""}
           />
           <PrazoItem
             label="Impugnação até"
-            value={formatPrazo(data.prazos.impugnacaoAte) || data.prazos.impugnacao}
+            value={(formatPrazo(data.prazos.impugnacaoAte) || data.prazos.impugnacao) ?? ""}
           />
         </div>
         {data.prazos.contatoEsclarecimentoImpugnacao && (
