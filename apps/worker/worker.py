@@ -32,6 +32,10 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 QUEUE_NAME = "document:ingest"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
+MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "documents")
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536
 CHAT_MODEL = "gpt-4o-mini"
@@ -227,18 +231,54 @@ def download_to_temp(file_url: str, file_name: str) -> str:
         raise
 
 
+def _s3_client():
+    """Return boto3 S3 client for MinIO if configured, else None."""
+    if not (MINIO_ENDPOINT and MINIO_ACCESS_KEY and MINIO_SECRET_KEY):
+        return None
+    try:
+        import boto3
+        from botocore.config import Config
+        return boto3.client(
+            "s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=MINIO_ACCESS_KEY,
+            aws_secret_access_key=MINIO_SECRET_KEY,
+            region_name=os.environ.get("MINIO_REGION", "us-east-1"),
+            config=Config(signature_version="s3v4"),
+        )
+    except Exception as e:
+        logger.warning("MinIO client not available: %s", e)
+        return None
+
+
+def upload_debug_json(user_id: str, document_id: str, data: dict) -> None:
+    """Upload a JSON payload to the bucket for debugging (e.g. unstructured parse result)."""
+    client = _s3_client()
+    if not client:
+        return
+    key = f"{user_id}/{document_id}-unstructured-debug.json"
+    try:
+        body = json.dumps(data, ensure_ascii=False, indent=2)
+        client.put_object(Bucket=MINIO_BUCKET, Key=key, Body=body.encode("utf-8"), ContentType="application/json")
+        logger.info("Debug JSON uploaded: bucket=%s key=%s size=%d bytes", MINIO_BUCKET, key, len(body))
+    except Exception as e:
+        logger.warning("Failed to upload debug JSON to bucket: %s", e)
+
+
 # Language for unstructured partition (OCR and partitioning). "por" = Portuguese (pt-BR).
 PARTITION_LANGUAGES = ["por"]
 
 
-def parse_file(file_path: str, file_name: str) -> list[str]:
-    """Parse PDF or CSV with open-source unstructured library; return list of text chunks."""
+def parse_file(file_path: str, file_name: str) -> tuple[list[str], dict]:
+    """Parse PDF or CSV with open-source unstructured library; return (chunks, debug_payload)."""
     logger.info("Parsing file: path=%s fileName=%s", file_path, file_name or "document")
     elements = partition(filename=file_path, languages=PARTITION_LANGUAGES)
     logger.info("Partition produced %d elements", len(elements))
     chunks = []
+    elements_debug = []
     for el in elements:
         text = getattr(el, "text", None) or str(el)
+        elements_debug.append({"type": type(el).__name__, "text": text})
         if text and text.strip():
             chunks.append(text)
     if not chunks:
@@ -252,7 +292,8 @@ def parse_file(file_path: str, file_name: str) -> list[str]:
         if not chunks:
             chunks = ["(no text extracted)"]
     logger.info("Parse complete: %d text chunks", len(chunks))
-    return chunks
+    debug_payload = {"fileName": file_name or "document", "elementCount": len(elements), "elements": elements_debug, "chunks": chunks}
+    return chunks, debug_payload
 
 
 def embed_texts(openai_client: OpenAI, texts: list[str]) -> list[list[float]]:
@@ -379,7 +420,8 @@ def process_job(payload: dict):
         logger.info("Downloading file for documentId=%s", document_id)
         temp_path = download_to_temp(file_url, file_name)
         logger.info("Parsing file for documentId=%s", document_id)
-        chunks_text = parse_file(temp_path, file_name)
+        chunks_text, unstructured_debug = parse_file(temp_path, file_name)
+        upload_debug_json(user_id, document_id, unstructured_debug)
         if not chunks_text:
             raise ValueError("No content extracted")
         openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
