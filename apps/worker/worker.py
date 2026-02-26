@@ -51,7 +51,7 @@ Com base no contexto fornecido (conteúdo do documento), extraia todas as inform
 
 Para PRAZOS: preencha data e horário separadamente quando o edital informar (ex.: "Enviar proposta até 01/03/2025 14h" -> enviarPropostaAte: { "data": "01/03/2025", "horario": "14h" }).
 
-Para DOCUMENTOS: agrupe por categoria (Atestado Técnico / Qualificação Jurídica-Fiscal / Qualificação Econômica / Declarações / Proposta / Outros). Cada item deve ter: documento (nome do documento solicitado), solicitado (true se o edital exige SIM), status e observacao quando houver.
+Para DOCUMENTOS: agrupe por categoria. Use exatamente estas categorias quando houver itens no edital: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros". Para CADA linha do edital em cada seção, inclua um item com: referencia (número/item do edital, ex: 6.2.1.1.1, 8.2. - a.1), local (TR ou ED quando o edital indicar), documento (texto completo do documento exigido), solicitado (true se o edital exige SIM), status (string vazia se não aplicável), observacao (quando houver). Extraia TODOS os itens de Atestado Técnico / especificação técnica listados no edital, não apenas um resumo.
 
 Declaração de Visita Técnica: preencha visitaTecnica true se o edital exigir visita técnica obrigatória.
 
@@ -135,12 +135,14 @@ CHECKLIST_JSON_SCHEMA = {
                         "items": {
                             "type": "object",
                             "properties": {
+                                "referencia": {"type": "string"},
+                                "local": {"type": "string"},
                                 "documento": {"type": "string"},
                                 "solicitado": {"type": "boolean"},
                                 "status": {"type": "string"},
                                 "observacao": {"type": "string"},
                             },
-                            "required": ["documento", "solicitado", "status", "observacao"],
+                            "required": ["referencia", "local", "documento", "solicitado", "status", "observacao"],
                             "additionalProperties": False,
                         },
                     },

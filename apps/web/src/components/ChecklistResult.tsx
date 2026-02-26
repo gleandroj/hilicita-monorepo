@@ -48,6 +48,7 @@ export interface ChecklistData {
       documento?: string;
       descricao?: string; // compat
       referencia?: string;
+      local?: string; // TR | ED
       solicitado: boolean;
       status?: string;
       observacao?: string;
@@ -238,9 +239,9 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
                   )}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      {item.referencia && (
+                      {(item.referencia || item.local) && (
                         <Badge variant="outline" className="shrink-0 text-xs">
-                          {item.referencia}
+                          {[item.referencia, item.local].filter(Boolean).join(" · ")}
                         </Badge>
                       )}
                       <p className="text-sm text-foreground">{descricao}</p>
