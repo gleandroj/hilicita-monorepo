@@ -12,6 +12,9 @@ export const auth = betterAuth({
   secret:
     process.env.BETTER_AUTH_SECRET ?? 'development-secret-change-in-production',
   trustedOrigins: process.env.BETTER_AUTH_TRUSTED_ORIGINS?.split(',') ?? [],
+  emailAndPassword: {
+    enabled: true,
+  },
   socialProviders: {
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID as string,
