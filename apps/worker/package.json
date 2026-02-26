@@ -2,7 +2,8 @@
   "name": "worker",
   "private": true,
   "scripts": {
-    "dev": "python worker.py",
+    "dev": "python -c \"import redis\" 2>/dev/null && python worker.py || (echo 'Worker: install deps with npm run install:py (or pip install -r requirements.txt)'; exit 0)",
+    "install:py": "pip install -r requirements.txt",
     "build": "echo 'No build step for Python worker'"
   }
 }
