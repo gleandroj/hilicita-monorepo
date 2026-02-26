@@ -37,17 +37,4 @@ export class ChecklistsController {
     if (!session?.user?.id) throw new Error('Unauthorized');
     return this.checklistsService.delete(id, session.user.id);
   }
-
-  @Post('generate')
-  async generate(
-    @Auth.Session() session: Auth.UserSession,
-    @Body() body: { documentId: string; fileName: string },
-  ) {
-    if (!session?.user?.id) throw new Error('Unauthorized');
-    return this.checklistsService.generate(
-      body.documentId,
-      session.user.id,
-      body.fileName ?? 'document',
-    );
-  }
 }

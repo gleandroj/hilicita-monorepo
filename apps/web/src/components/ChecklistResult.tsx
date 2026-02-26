@@ -1,40 +1,68 @@
-import { CheckCircle2, XCircle, AlertCircle, Download, Building2, Calendar, MapPin, DollarSign, Zap } from "lucide-react";
+import { CheckCircle2, XCircle, AlertCircle, Building2, Calendar, MapPin, DollarSign, Zap, FileText } from "lucide-react";
 import { motion } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 
+/** Estrutura alinhada ao modelo Excel (CHECK LIST - Nº INTERNO - Nº EDITAL - ÓRGÃO). */
 export interface ChecklistData {
   edital: {
+    licitacao?: string;
+    edital?: string;
     orgao: string;
     objeto: string;
     dataSessao: string;
     portal: string;
-    valorTotal: string;
-    vigencia: string;
-    modalidade: string;
-    concessionaria: string;
-    consumoMensal: string;
-    consumoAnual: string;
+    numeroProcessoInterno?: string;
+    /** Total em R$ (campo principal para listagem) */
+    totalReais?: string;
+    valorTotal?: string; // compat
+    valorEnergia?: string;
+    volumeEnergia?: string;
+    vigenciaContrato?: string;
+    vigencia?: string; // compat
+    modalidadeConcessionaria?: string;
+    modalidade?: string; // compat
+    concessionaria?: string; // compat
+    consumoMensal?: string;
+    consumoAnual?: string;
+    prazoInicioInjecao?: string;
   };
+  modalidadeLicitacao?: string;
   participacao: {
     permiteConsorcio: boolean;
     beneficiosMPE: boolean;
+    itemEdital?: string;
   };
   prazos: {
-    proposta: string;
-    esclarecimentos: string;
-    impugnacao: string;
+    enviarPropostaAte?: { data: string; horario: string };
+    esclarecimentosAte?: { data: string; horario: string };
+    impugnacaoAte?: { data: string; horario: string };
+    contatoEsclarecimentoImpugnacao?: string;
+    /** Compat: texto único */
+    proposta?: string;
+    esclarecimentos?: string;
+    impugnacao?: string;
   };
-  visitaTecnica: boolean;
   documentos: Array<{
     categoria: string;
     itens: Array<{
-      referencia: string;
-      descricao: string;
+      documento?: string;
+      descricao?: string; // compat
+      referencia?: string;
       solicitado: boolean;
-      envelope: string;
+      status?: string;
       observacao?: string;
+      envelope?: string;
     }>;
   }>;
+  visitaTecnica: boolean;
+  proposta?: { validadeProposta?: string };
+  sessao?: {
+    diferencaEntreLances?: string;
+    horasPropostaAjustada?: string;
+    abertoFechado?: string;
+  };
+  outrosEdital?: { mecanismoPagamento?: string };
+  responsavelAnalise?: string;
   pontuacao?: number;
   recomendacao?: string;
 }
@@ -44,8 +72,20 @@ interface ChecklistResultProps {
   fileName: string;
 }
 
+function formatPrazo(p: { data?: string; horario?: string } | string | undefined): string {
+  if (!p) return "";
+  if (typeof p === "string") return p;
+  const parts = [p.data, p.horario].filter(Boolean);
+  return parts.join(" ");
+}
+
 const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
   const scoreColor = (data.pontuacao ?? 0) >= 70 ? "text-success" : (data.pontuacao ?? 0) >= 40 ? "text-warning" : "text-destructive";
+  const ed = data.edital;
+  const valorTotal = ed.totalReais ?? ed.valorTotal ?? "";
+  const vigencia = ed.vigenciaContrato ?? ed.vigencia ?? "";
+  const modalidade = ed.modalidadeConcessionaria ?? ed.modalidade ?? "";
+  const concessionaria = ed.concessionaria ?? "";
 
   return (
     <motion.div
@@ -75,8 +115,8 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
       {/* Recommendation */}
       {data.recomendacao && (
         <div className={`rounded-xl p-4 border ${
-          data.recomendacao.toLowerCase().includes("participar") 
-            ? "bg-primary/5 border-primary/20" 
+          data.recomendacao.toLowerCase().includes("participar")
+            ? "bg-primary/5 border-primary/20"
             : "bg-destructive/5 border-destructive/20"
         }`}>
           <div className="flex items-center gap-2">
@@ -89,33 +129,40 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
 
       {/* Edital Info Cards */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <InfoCard icon={<Building2 className="h-4 w-4" />} label="Órgão" value={data.edital.orgao} />
-        <InfoCard icon={<DollarSign className="h-4 w-4" />} label="Valor Total" value={data.edital.valorTotal} />
-        <InfoCard icon={<Calendar className="h-4 w-4" />} label="Data da Sessão" value={data.edital.dataSessao} />
-        <InfoCard icon={<MapPin className="h-4 w-4" />} label="Portal" value={data.edital.portal} />
-        <InfoCard icon={<Zap className="h-4 w-4" />} label="Consumo Mensal" value={data.edital.consumoMensal} />
-        <InfoCard icon={<Zap className="h-4 w-4" />} label="Consumo Anual" value={data.edital.consumoAnual} />
+        <InfoCard icon={<Building2 className="h-4 w-4" />} label="Órgão" value={ed.orgao} />
+        <InfoCard icon={<DollarSign className="h-4 w-4" />} label="Total (R$)" value={valorTotal} />
+        <InfoCard icon={<Calendar className="h-4 w-4" />} label="Data da Sessão" value={ed.dataSessao} />
+        <InfoCard icon={<MapPin className="h-4 w-4" />} label="Portal" value={ed.portal} />
+        <InfoCard icon={<FileText className="h-4 w-4" />} label="Nº Processo Interno" value={ed.numeroProcessoInterno ?? ""} />
+        <InfoCard icon={<Zap className="h-4 w-4" />} label="Valor da Energia" value={ed.valorEnergia ?? ""} />
+        <InfoCard icon={<Zap className="h-4 w-4" />} label="Volume de Energia" value={ed.volumeEnergia ?? ""} />
+        <InfoCard icon={<Calendar className="h-4 w-4" />} label="Vigência de Contrato" value={vigencia} />
       </div>
 
       {/* Objeto */}
       <div className="rounded-xl bg-card p-5 shadow-card border border-border">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Objeto</p>
-        <p className="text-sm text-foreground leading-relaxed">{data.edital.objeto}</p>
+        <p className="text-sm text-foreground leading-relaxed">{ed.objeto || "—"}</p>
       </div>
 
-      {/* Modalidade & Participação */}
+      {/* Modalidade da Licitação & Participação */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-xl bg-card p-5 shadow-card border border-border space-y-3">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Modalidade</p>
-          <p className="font-display font-semibold text-foreground">{data.edital.modalidade}</p>
-          <p className="text-sm text-muted-foreground">{data.edital.concessionaria}</p>
-          <p className="text-sm text-muted-foreground">Vigência: {data.edital.vigencia}</p>
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Modalidade da Licitação</p>
+          <p className="font-display font-semibold text-foreground">{modalidade || "—"}</p>
+          {concessionaria && <p className="text-sm text-muted-foreground">{concessionaria}</p>}
+          {ed.prazoInicioInjecao && (
+            <p className="text-sm text-muted-foreground">Prazo para início injeção: {ed.prazoInicioInjecao}</p>
+          )}
         </div>
         <div className="rounded-xl bg-card p-5 shadow-card border border-border space-y-3">
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Participação</p>
-          <StatusBadge label="Consórcio" active={data.participacao.permiteConsorcio} />
-          <StatusBadge label="Benefícios MPE" active={data.participacao.beneficiosMPE} />
+          <StatusBadge label="Permite participação em consórcio" active={data.participacao.permiteConsorcio} />
+          <StatusBadge label="Benefícios às MPE" active={data.participacao.beneficiosMPE} />
           <StatusBadge label="Visita Técnica Obrigatória" active={data.visitaTecnica} />
+          {data.participacao.itemEdital && (
+            <p className="text-sm text-muted-foreground pt-1">{data.participacao.itemEdital}</p>
+          )}
         </div>
       </div>
 
@@ -123,16 +170,54 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
       <div className="rounded-xl bg-card p-5 shadow-card border border-border">
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">Prazos</p>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          <PrazoItem label="Proposta" value={data.prazos.proposta} />
-          <PrazoItem label="Esclarecimentos" value={data.prazos.esclarecimentos} />
-          <PrazoItem label="Impugnação" value={data.prazos.impugnacao} />
+          <PrazoItem
+            label="Enviar proposta até"
+            value={formatPrazo(data.prazos.enviarPropostaAte) || data.prazos.proposta}
+          />
+          <PrazoItem
+            label="Esclarecimentos até"
+            value={formatPrazo(data.prazos.esclarecimentosAte) || data.prazos.esclarecimentos}
+          />
+          <PrazoItem
+            label="Impugnação até"
+            value={formatPrazo(data.prazos.impugnacaoAte) || data.prazos.impugnacao}
+          />
         </div>
+        {data.prazos.contatoEsclarecimentoImpugnacao && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Contato para envio Esclarecimento/Impugnação: {data.prazos.contatoEsclarecimentoImpugnacao}
+          </p>
+        )}
+      </div>
+
+      {/* Proposta / Sessão / Outros */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {data.proposta?.validadeProposta && (
+          <div className="rounded-xl bg-card p-4 shadow-card border border-border">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Validade da Proposta</p>
+            <p className="text-sm text-foreground mt-1">{data.proposta.validadeProposta}</p>
+          </div>
+        )}
+        {data.sessao && (data.sessao.diferencaEntreLances || data.sessao.horasPropostaAjustada || data.sessao.abertoFechado) && (
+          <div className="rounded-xl bg-card p-4 shadow-card border border-border space-y-1">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Sessão</p>
+            {data.sessao.diferencaEntreLances && <p className="text-sm text-foreground">{data.sessao.diferencaEntreLances}</p>}
+            {data.sessao.horasPropostaAjustada && <p className="text-sm text-foreground">{data.sessao.horasPropostaAjustada}</p>}
+            {data.sessao.abertoFechado && <p className="text-sm text-foreground">{data.sessao.abertoFechado}</p>}
+          </div>
+        )}
+        {data.outrosEdital?.mecanismoPagamento && (
+          <div className="rounded-xl bg-card p-4 shadow-card border border-border">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mecanismo de Pagamento</p>
+            <p className="text-sm text-foreground mt-1">{data.outrosEdital.mecanismoPagamento}</p>
+          </div>
+        )}
       </div>
 
       {/* Document Checklist */}
-      {data.documentos.map((cat, i) => (
+      {data.documentos?.map((cat, i) => (
         <motion.div
-          key={cat.categoria}
+          key={cat.categoria || i}
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: i * 0.1 }}
@@ -142,34 +227,43 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
             <h3 className="font-display font-semibold text-foreground">{cat.categoria}</h3>
           </div>
           <div className="divide-y divide-border">
-            {cat.itens.map((item, j) => (
-              <div key={j} className="flex items-start gap-3 px-5 py-3">
-                {item.solicitado ? (
-                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
-                ) : (
-                  <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    {item.referencia && (
-                      <Badge variant="outline" className="shrink-0 text-xs">
-                        {item.referencia}
-                      </Badge>
+            {cat.itens?.map((item, j) => {
+              const descricao = item.documento ?? item.descricao ?? "";
+              return (
+                <div key={j} className="flex items-start gap-3 px-5 py-3">
+                  {item.solicitado ? (
+                    <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />
+                  ) : (
+                    <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {item.referencia && (
+                        <Badge variant="outline" className="shrink-0 text-xs">
+                          {item.referencia}
+                        </Badge>
+                      )}
+                      <p className="text-sm text-foreground">{descricao}</p>
+                    </div>
+                    {(item.observacao || item.status) && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {[item.status, item.observacao].filter(Boolean).join(" · ")}
+                      </p>
                     )}
-                    <p className="text-sm text-foreground">{item.descricao}</p>
                   </div>
-                  {item.observacao && (
-                    <p className="mt-1 text-xs text-muted-foreground">{item.observacao}</p>
+                  {item.envelope && (
+                    <span className="shrink-0 text-xs text-muted-foreground">{item.envelope}</span>
                   )}
                 </div>
-                {item.envelope && (
-                  <span className="shrink-0 text-xs text-muted-foreground">{item.envelope}</span>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </motion.div>
       ))}
+
+      {data.responsavelAnalise && (
+        <p className="text-xs text-muted-foreground">Responsável pela análise: {data.responsavelAnalise}</p>
+      )}
     </motion.div>
   );
 };

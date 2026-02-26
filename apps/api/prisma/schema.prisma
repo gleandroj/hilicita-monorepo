@@ -49,29 +49,34 @@ model Verification {
 }
 
 model Checklist {
-  id         String   @id @default(uuid())
-  userId     String
-  file_name  String
-  data       Json
-  pontuacao  Int?
-  orgao      String?
-  objeto     String?
+  id          String    @id @default(uuid())
+  userId      String
+  file_name   String
+  data        Json
+  pontuacao   Int?
+  orgao       String?
+  objeto      String?
   valor_total String?
-  created_at DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId  String?   @unique
+  created_at  DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document    Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([documentId])
   @@index([created_at(sort: Desc)])
 }
 
 model Document {
-  id         String   @id @default(uuid())
-  userId     String
-  file_name  String
-  status     String   @default("pending") // pending | processing | done | failed
-  created_at DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  chunks     DocumentChunk[]
+  id          String      @id @default(uuid())
+  userId      String
+  file_name   String
+  status      String      @default("pending") // pending | processing | done | failed
+  storageKey  String?     // MinIO object key
+  created_at  DateTime    @default(now())
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks      DocumentChunk[]
+  checklist   Checklist?
 
   @@index([userId])
   @@index([status])

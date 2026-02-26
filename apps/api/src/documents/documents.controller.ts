@@ -42,4 +42,13 @@ export class DocumentsController {
     if (!session?.user?.id) throw new BadRequestException('Unauthorized');
     return this.documentsService.getStatus(id, session.user.id);
   }
+
+  @Get(':id/checklist')
+  async getChecklist(
+    @Param('id') id: string,
+    @Auth.Session() session: Auth.UserSession,
+  ) {
+    if (!session?.user?.id) throw new BadRequestException('Unauthorized');
+    return this.documentsService.getChecklistForDocument(id, session.user.id);
+  }
 }

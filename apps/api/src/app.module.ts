@@ -4,7 +4,7 @@ import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { AuthModule } from './auth/auth.module';
-import { LlmModule } from './llm/llm.module';
+import { StorageModule } from './storage/storage.module';
 import { DocumentsModule } from './documents/documents.module';
 import { ChecklistsModule } from './checklists/checklists.module';
 
@@ -13,7 +13,7 @@ import { ChecklistsModule } from './checklists/checklists.module';
     PrismaModule,
     RedisModule,
     AuthModule,
-    LlmModule,
+    StorageModule,
     DocumentsModule,
     ChecklistsModule,
   ],

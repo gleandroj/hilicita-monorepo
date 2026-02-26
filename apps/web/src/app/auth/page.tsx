@@ -10,6 +10,11 @@ import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
 import { Zap } from "lucide-react";
 
+function handleGoogleSignIn() {
+  const callbackURL = typeof window !== "undefined" ? `${window.location.origin}/` : "/";
+  authClient.signIn.social({ provider: "google", callbackURL });
+}
+
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState("");
@@ -109,6 +114,25 @@ export default function AuthPage() {
           </div>
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? "Carregando..." : isLogin ? "Entrar" : "Criar conta"}
+          </Button>
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t border-border" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase text-muted-foreground">
+              <span className="bg-background px-2">ou</span>
+            </div>
+          </div>
+
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={() => handleGoogleSignIn()}
+            disabled={loading}
+          >
+            Entrar com Google
           </Button>
         </form>
 
