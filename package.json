@@ -1,0 +1,16 @@
+{
+  "name": "hilicita-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "npx turbo run build",
+    "dev": "npx turbo run dev",
+    "lint": "npx turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "packageManager": "npm@10.8.2"
+}

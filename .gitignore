@@ -1,0 +1,16 @@
+node_modules
+.next
+dist
+.turbo
+.env
+.env.local
+uploads
+.env.*.local
+*.log
+.DS_Store
+.venv
+venv
+__pycache__
+*.pyc
+.idea
+.vscode

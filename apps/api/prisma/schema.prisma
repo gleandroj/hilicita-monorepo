@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Better Auth tables (standard names)
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  checklists    Checklist[]
+  documents     Document[]
+  documentChunks DocumentChunk[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Account {
+  id           String  @id @default(cuid())
+  userId       String
+  accountId    String
+  providerId  String
+  accessToken  String?
+  refreshToken String?
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt DateTime
+}
+
+model Checklist {
+  id         String   @id @default(uuid())
+  userId     String
+  file_name  String
+  data       Json
+  pontuacao  Int?
+  orgao      String?
+  objeto     String?
+  valor_total String?
+  created_at DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([created_at(sort: Desc)])
+}
+
+model Document {
+  id         String   @id @default(uuid())
+  userId     String
+  file_name  String
+  status     String   @default("pending") // pending | processing | done | failed
+  created_at DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chunks     DocumentChunk[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model DocumentChunk {
+  id          String   @id @default(uuid())
+  documentId  String
+  userId      String
+  content     String   @db.Text
+  embedding   Unsupported("vector(1536)")?
+  metadata    Json?
+  created_at  DateTime @default(now())
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([userId])
+}
