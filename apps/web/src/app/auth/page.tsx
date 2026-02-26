@@ -41,10 +41,7 @@ export default function AuthPage() {
       } else {
         const { error } = await authClient.signUp.email({ email, password, name: name?.trim() || "User" });
         if (error) throw new Error(error.message);
-        toast({
-          title: "Conta criada!",
-          description: "Verifique seu e-mail para confirmar o cadastro.",
-        });
+        toast({ title: "Conta criada! Você já pode entrar." });
       }
     } catch (err) {
       toast({
