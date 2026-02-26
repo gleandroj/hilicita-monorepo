@@ -1,10 +1,10 @@
--- Enable pgvector extension (required for DocumentChunk.embedding)
+-- Enable pgvector (required for DocumentChunk.embedding)
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
--- CreateTable
+-- CreateTable User (Better Auth)
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
     "name" TEXT,
@@ -17,7 +17,7 @@ CREATE TABLE "User" (
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable Session (Better Auth)
 CREATE TABLE "Session" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE "Session" (
     CONSTRAINT "Session_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable Account (Better Auth + email/password)
 CREATE TABLE "Account" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
@@ -35,11 +35,14 @@ CREATE TABLE "Account" (
     "providerId" TEXT NOT NULL,
     "accessToken" TEXT,
     "refreshToken" TEXT,
+    "password" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Account_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable Verification (Better Auth)
 CREATE TABLE "Verification" (
     "id" TEXT NOT NULL,
     "identifier" TEXT NOT NULL,
@@ -49,7 +52,7 @@ CREATE TABLE "Verification" (
     CONSTRAINT "Verification_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable Checklist
 CREATE TABLE "Checklist" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
@@ -59,23 +62,25 @@ CREATE TABLE "Checklist" (
     "orgao" TEXT,
     "objeto" TEXT,
     "valor_total" TEXT,
+    "documentId" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Checklist_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable Document
 CREATE TABLE "Document" (
     "id" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "file_name" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'pending',
+    "storageKey" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Document_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
+-- CreateTable DocumentChunk
 CREATE TABLE "DocumentChunk" (
     "id" TEXT NOT NULL,
     "documentId" TEXT NOT NULL,
@@ -90,42 +95,24 @@ CREATE TABLE "DocumentChunk" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
-
--- CreateIndex
 CREATE UNIQUE INDEX "Session_token_key" ON "Session"("token");
+CREATE UNIQUE INDEX "Checklist_documentId_key" ON "Checklist"("documentId");
 
--- CreateIndex
 CREATE INDEX "Checklist_userId_idx" ON "Checklist"("userId");
-
--- CreateIndex
+CREATE INDEX "Checklist_documentId_idx" ON "Checklist"("documentId");
 CREATE INDEX "Checklist_created_at_idx" ON "Checklist"("created_at" DESC);
 
--- CreateIndex
 CREATE INDEX "Document_userId_idx" ON "Document"("userId");
-
--- CreateIndex
 CREATE INDEX "Document_status_idx" ON "Document"("status");
 
--- CreateIndex
 CREATE INDEX "DocumentChunk_documentId_idx" ON "DocumentChunk"("documentId");
-
--- CreateIndex
 CREATE INDEX "DocumentChunk_userId_idx" ON "DocumentChunk"("userId");
 
 -- AddForeignKey
 ALTER TABLE "Session" ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "Checklist" ADD CONSTRAINT "Checklist_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
+ALTER TABLE "Checklist" ADD CONSTRAINT "Checklist_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Document" ADD CONSTRAINT "Document_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "DocumentChunk" ADD CONSTRAINT "DocumentChunk_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
 ALTER TABLE "DocumentChunk" ADD CONSTRAINT "DocumentChunk_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
