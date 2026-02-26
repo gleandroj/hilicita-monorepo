@@ -12,6 +12,14 @@ export class ChecklistsService {
     });
   }
 
+  async findOne(id: string, userId: string) {
+    const c = await this.prisma.checklist.findFirst({
+      where: { id, userId },
+    });
+    if (!c) throw new NotFoundException('Checklist not found');
+    return c;
+  }
+
   async create(
     userId: string,
     data: {

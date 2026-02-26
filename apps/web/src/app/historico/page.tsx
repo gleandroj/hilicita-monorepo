@@ -1,15 +1,14 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, apiDelete } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import Header from "@/components/Header";
-import ChecklistResult, { type ChecklistData } from "@/components/ChecklistResult";
+import { type ChecklistData } from "@/components/ChecklistResult";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { motion } from "framer-motion";
-import { Calendar, Building2, DollarSign, Eye, Trash2, FileText, ArrowLeft, Search, SlidersHorizontal, X } from "lucide-react";
+import { Calendar, Building2, DollarSign, Eye, Trash2, FileText, Search, SlidersHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -34,14 +33,12 @@ interface SavedChecklist {
 function HistoryContent() {
   const [checklists, setChecklists] = useState<SavedChecklist[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<SavedChecklist | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [scoreFilter, setScoreFilter] = useState<string>("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>();
   const [dateTo, setDateTo] = useState<Date | undefined>();
   const { user } = useAuth();
   const { toast } = useToast();
-  const router = useRouter();
 
   const filtered = useMemo(() => {
     return checklists.filter((c) => {
@@ -81,34 +78,17 @@ function HistoryContent() {
     }
   }, [user]);
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
     try {
       await apiDelete(`/checklists/${id}`);
       setChecklists((prev) => prev.filter((c) => c.id !== id));
-      if (selected?.id === id) setSelected(null);
       toast({ title: "Checklist excluído" });
     } catch (err) {
       toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
   };
-
-  if (selected) {
-    return (
-      <div className="min-h-screen bg-background">
-        <Header />
-        <main className="container mx-auto px-6 py-8 max-w-4xl space-y-6">
-          <button
-            onClick={() => setSelected(null)}
-            className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors font-medium"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            Voltar ao histórico
-          </button>
-          <ChecklistResult data={selected.data} fileName={selected.file_name} />
-        </main>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -206,7 +186,7 @@ function HistoryContent() {
                   className="rounded-xl bg-card p-5 shadow-card border border-border hover:border-primary/30 transition-colors"
                 >
                   <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0 flex-1 space-y-2">
+                    <Link href={`/historico/${checklist.id}`} className="min-w-0 flex-1 space-y-2 block">
                       <p className="font-display font-semibold text-foreground truncate">{checklist.file_name}</p>
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                         {checklist.orgao && (
@@ -236,12 +216,14 @@ function HistoryContent() {
                           Pontuação: {checklist.pontuacao}
                         </span>
                       )}
-                    </div>
+                    </Link>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button size="sm" variant="ghost" onClick={() => setSelected(checklist)}>
-                        <Eye className="h-4 w-4" />
+                      <Button size="sm" variant="ghost" asChild>
+                        <Link href={`/historico/${checklist.id}`} aria-label="Ver detalhes">
+                          <Eye className="h-4 w-4" />
+                        </Link>
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => handleDelete(checklist.id)}>
+                      <Button size="sm" variant="ghost" onClick={(e) => handleDelete(e, checklist.id)} aria-label="Excluir">
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </div>

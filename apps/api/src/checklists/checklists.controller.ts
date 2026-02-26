@@ -12,6 +12,15 @@ export class ChecklistsController {
     return this.checklistsService.findAll(session.user.id);
   }
 
+  @Get(':id')
+  async getOne(
+    @Param('id') id: string,
+    @Auth.Session() session: Auth.UserSession,
+  ) {
+    if (!session?.user?.id) throw new Error('Unauthorized');
+    return this.checklistsService.findOne(id, session.user.id);
+  }
+
   @Post()
   async create(
     @Auth.Session() session: Auth.UserSession,
