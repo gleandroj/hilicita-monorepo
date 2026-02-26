@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Document ingest worker: consumes Redis queue, downloads file from presigned URL,
-parses with open-source unstructured library, uploads chunks to OpenAI vector store,
-and generates a checklist using semantic search over the vector store.
+parses with open-source unstructured library, and generates a checklist by sending
+all parsed elements into the LLM prompt. Vector store is disabled by default but
+can be re-enabled for semantic search over the document later.
 Updates document status in Postgres.
 """
 import os
@@ -41,9 +42,12 @@ CHAT_MODEL = "gpt-4o-mini"
 CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
 TOP_K = 10
 
+# When False, checklist uses full document text in the prompt; vector store is skipped (can re-enable later).
+USE_VECTOR_STORE = False
+
 CHECKLIST_SYSTEM_PROMPT = """Você é um especialista em licitações brasileiras. Seu trabalho é preencher um checklist estruturado com base no documento do edital, seguindo o modelo padrão de checklist de licitação.
 
-Com base no contexto fornecido (trechos do documento), extraia todas as informações nos campos indicados. Use string vazia quando não encontrar a informação e false para campos booleanos quando não aplicável.
+Com base no contexto fornecido (conteúdo do documento), extraia todas as informações nos campos indicados. Use string vazia quando não encontrar a informação e false para campos booleanos quando não aplicável.
 
 Para PRAZOS: preencha data e horário separadamente quando o edital informar (ex.: "Enviar proposta até 01/03/2025 14h" -> enviarPropostaAte: { "data": "01/03/2025", "horario": "14h" }).
 
@@ -427,11 +431,15 @@ def search_vector_store(
     return texts
 
 
+def build_full_document_context(chunks: list[str]) -> str:
+    """Build context string from all Unstructured elements (chunks); no truncation."""
+    return CHUNK_SEP.join(c.strip() for c in chunks if c and c.strip())
+
+
 def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
     """Call OpenAI with Structured Outputs; return (checklist dict, debug payload)."""
     logger.info("Generating checklist: fileName=%s context_len=%d", file_name or "document", len(context))
     user_content = f"Contexto do documento ({file_name}):\n\n{context}\n\nExtraia o checklist em JSON."
-    logger.info("Checklist user_content (len=%d): %s", len(user_content), user_content)
     resp = openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[
@@ -535,17 +543,21 @@ def process_job(payload: dict):
         openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
         if not openai_client:
             raise RuntimeError("OPENAI_API_KEY is not set")
-        logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
-        vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
-        logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
         conn = get_conn()
         try:
-            update_document_vector_store(conn, document_id, vector_store_id)
+            if USE_VECTOR_STORE:
+                logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
+                vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
+                logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
+                update_document_vector_store(conn, document_id, vector_store_id)
+                logger.info("Searching vector store for checklist context: documentId=%s", document_id)
+                relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
+                context = "\n\n".join(relevant)
+            else:
+                # Use all Unstructured elements in the prompt (no vector store)
+                logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
+                context = build_full_document_context(chunks_text)
 
-            # Generate checklist: search vector store and fill structured checklist
-            logger.info("Searching vector store for checklist context: documentId=%s", document_id)
-            relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
-            context = "\n\n".join(relevant)
             checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
             openai_debug = {"checklist": checklist_openai_debug}
             upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
@@ -580,7 +592,7 @@ def main():
         logger.error("DATABASE_URL is required")
         raise SystemExit("DATABASE_URL is required")
     if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY is not set; vector store and checklist will fail")
+        logger.warning("OPENAI_API_KEY is not set; checklist generation will fail")
     r = redis.Redis.from_url(REDIS_URL)
     logger.info("Worker listening on queue %s (brpop timeout=30s)", QUEUE_NAME)
     while True:
