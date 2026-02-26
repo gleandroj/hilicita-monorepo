@@ -302,37 +302,84 @@ def parse_file(file_path: str, file_name: str) -> tuple[list[str], dict]:
     return chunks, debug_payload
 
 
+# Max characters per merged file to stay well under API token limits (~2M tokens per file).
+MAX_CHARS_PER_MERGED_FILE = 500_000
+CHUNK_SEP = "\n\n"
+
+
+def _merge_chunks_to_temp_files(
+    chunks: list[str], max_chars_per_file: int = MAX_CHARS_PER_MERGED_FILE
+) -> list[str]:
+    """Merge chunks into one or more temp text files. Returns list of temp file paths. Caller must delete."""
+    if not chunks:
+        return []
+    paths = []
+    current_parts = []
+    current_len = 0
+    try:
+        for text in chunks:
+            part = text.strip()
+            if not part:
+                continue
+            part_len = len(part) + len(CHUNK_SEP)
+            if current_parts and (current_len + part_len) > max_chars_per_file:
+                fd, path = tempfile.mkstemp(suffix=".txt")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(CHUNK_SEP.join(current_parts))
+                paths.append(path)
+                current_parts = []
+                current_len = 0
+            current_parts.append(part)
+            current_len += part_len
+        if current_parts:
+            fd, path = tempfile.mkstemp(suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(CHUNK_SEP.join(current_parts))
+            paths.append(path)
+        return paths
+    except Exception:
+        for p in paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+        raise
+
+
 def create_vector_store_and_upload_chunks(
     openai_client: OpenAI, document_id: str, chunks: list[str]
 ) -> str:
-    """Create an OpenAI vector store, upload each chunk as a text file, wait until ready. Returns vector_store_id."""
+    """Create an OpenAI vector store, upload merged document file(s), wait until ready. Returns vector_store_id."""
     if not chunks:
         raise ValueError("No chunks to upload")
-    logger.info("Creating vector store for documentId=%s with %d chunks", document_id, len(chunks))
+    merged_paths = _merge_chunks_to_temp_files(chunks)
+    num_files = len(merged_paths)
+    logger.info(
+        "Creating vector store for documentId=%s with %d chunks merged into %d file(s)",
+        document_id,
+        len(chunks),
+        num_files,
+    )
     vs = openai_client.vector_stores.create(name=f"doc-{document_id}")
     vector_store_id = vs.id
-    temp_paths = []
+    file_ids = []
     try:
-        for i, text in enumerate(chunks):
-            fd, path = tempfile.mkstemp(suffix=".txt")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(text)
-                temp_paths.append(path)
-                with open(path, "rb") as f:
-                    file = openai_client.files.create(file=f, purpose="assistants")
-                openai_client.vector_stores.files.create(
-                    vector_store_id=vector_store_id, file_id=file.id
-                )
-            except Exception:
-                os.unlink(path)
-                if path in temp_paths:
-                    temp_paths.remove(path)
-                raise
+        for path in merged_paths:
+            with open(path, "rb") as f:
+                file = openai_client.files.create(file=f, purpose="assistants")
+            file_ids.append(file.id)
+        if num_files == 1:
+            openai_client.vector_stores.files.create(
+                vector_store_id=vector_store_id, file_id=file_ids[0]
+            )
+        else:
+            openai_client.vector_stores.file_batches.create_and_poll(
+                vector_store_id=vector_store_id, file_ids=file_ids
+            )
         _wait_for_vector_store_ready(openai_client, vector_store_id)
         return vector_store_id
     finally:
-        for p in temp_paths:
+        for p in merged_paths:
             try:
                 os.unlink(p)
             except Exception:
