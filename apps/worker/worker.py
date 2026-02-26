@@ -309,7 +309,7 @@ def create_vector_store_and_upload_chunks(
     if not chunks:
         raise ValueError("No chunks to upload")
     logger.info("Creating vector store for documentId=%s with %d chunks", document_id, len(chunks))
-    vs = openai_client.beta.vector_stores.create(name=f"doc-{document_id}")
+    vs = openai_client.vector_stores.create(name=f"doc-{document_id}")
     vector_store_id = vs.id
     temp_paths = []
     try:
@@ -321,7 +321,7 @@ def create_vector_store_and_upload_chunks(
                 temp_paths.append(path)
                 with open(path, "rb") as f:
                     file = openai_client.files.create(file=f, purpose="assistants")
-                openai_client.beta.vector_stores.files.create(
+                openai_client.vector_stores.files.create(
                     vector_store_id=vector_store_id, file_id=file.id
                 )
             except Exception:
@@ -343,7 +343,7 @@ def _wait_for_vector_store_ready(openai_client: OpenAI, vector_store_id: str, ma
     """Poll vector store until status is completed or failed."""
     start = time.monotonic()
     while (time.monotonic() - start) < max_wait_sec:
-        vs = openai_client.beta.vector_stores.retrieve(vector_store_id)
+        vs = openai_client.vector_stores.retrieve(vector_store_id)
         status = getattr(vs, "status", None)
         counts = getattr(vs, "file_counts", None)
         total = getattr(counts, "total", 0) if counts else 0
@@ -364,7 +364,7 @@ def search_vector_store(
 ) -> list[str]:
     """Search the vector store with a natural language query. Returns list of chunk texts."""
     logger.info("Searching vector store: vector_store_id=%s max_results=%d", vector_store_id, max_results)
-    resp = openai_client.beta.vector_stores.search(
+    resp = openai_client.vector_stores.search(
         vector_store_id=vector_store_id,
         query=query,
         max_num_results=max_results,
