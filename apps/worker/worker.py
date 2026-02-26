@@ -227,10 +227,14 @@ def download_to_temp(file_url: str, file_name: str) -> str:
         raise
 
 
+# Language for unstructured partition (OCR and partitioning). "por" = Portuguese (pt-BR).
+PARTITION_LANGUAGES = ["por"]
+
+
 def parse_file(file_path: str, file_name: str) -> list[str]:
     """Parse PDF or CSV with open-source unstructured library; return list of text chunks."""
     logger.info("Parsing file: path=%s fileName=%s", file_path, file_name or "document")
-    elements = partition(filename=file_path)
+    elements = partition(filename=file_path, languages=PARTITION_LANGUAGES)
     logger.info("Partition produced %d elements", len(elements))
     chunks = []
     for el in elements:
