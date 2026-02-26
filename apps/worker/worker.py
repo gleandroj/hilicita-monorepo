@@ -183,15 +183,18 @@ def get_conn():
 
 
 def update_document_status(conn, document_id: str, status: str):
+    logger.info("Updating document status: documentId=%s status=%s", document_id, status)
     with conn.cursor() as cur:
         cur.execute(
             'UPDATE "Document" SET status = %s WHERE id = %s',
             (status, document_id),
         )
     conn.commit()
+    logger.info("Document status updated: documentId=%s status=%s", document_id, status)
 
 
 def insert_chunks(conn, document_id: str, user_id: str, chunks: list[tuple[str, list[float]]]):
+    logger.info("Inserting chunks: documentId=%s userId=%s count=%d", document_id, user_id, len(chunks))
     with conn.cursor() as cur:
         for content, embedding in chunks:
             chunk_id = str(uuid.uuid4())
@@ -204,16 +207,20 @@ def insert_chunks(conn, document_id: str, user_id: str, chunks: list[tuple[str, 
                 (chunk_id, document_id, user_id, content, embedding_str),
             )
     conn.commit()
+    logger.info("Chunks inserted: documentId=%s count=%d", document_id, len(chunks))
 
 
 def download_to_temp(file_url: str, file_name: str) -> str:
     """Download file from URL to a temporary file; return path. Caller must delete."""
+    logger.info("Downloading file: fileName=%s url_len=%d", file_name or "document", len(file_url))
     suffix = os.path.splitext(file_name or "document")[1] or ".bin"
     fd, path = tempfile.mkstemp(suffix=suffix)
     try:
         with os.fdopen(fd, "wb") as f:
             with urllib.request.urlopen(file_url, timeout=300) as resp:
-                f.write(resp.read())
+                data = resp.read()
+                f.write(data)
+        logger.info("Download complete: path=%s size=%d bytes", path, len(data))
         return path
     except Exception:
         os.unlink(path)
@@ -222,7 +229,9 @@ def download_to_temp(file_url: str, file_name: str) -> str:
 
 def parse_file(file_path: str, file_name: str) -> list[str]:
     """Parse PDF or CSV with open-source unstructured library; return list of text chunks."""
+    logger.info("Parsing file: path=%s fileName=%s", file_path, file_name or "document")
     elements = partition(filename=file_path)
+    logger.info("Partition produced %d elements", len(elements))
     chunks = []
     for el in elements:
         text = getattr(el, "text", None) or str(el)
@@ -238,13 +247,16 @@ def parse_file(file_path: str, file_name: str) -> list[str]:
             pass
         if not chunks:
             chunks = ["(no text extracted)"]
+    logger.info("Parse complete: %d text chunks", len(chunks))
     return chunks
 
 
 def embed_texts(openai_client: OpenAI, texts: list[str]) -> list[list[float]]:
     """Batch embed texts with OpenAI."""
     if not texts:
+        logger.info("embed_texts: no texts, skipping")
         return []
+    logger.info("Embedding %d texts (model=%s batch_size=100)", len(texts), EMBEDDING_MODEL)
     embeddings = []
     batch_size = 100
     for i in range(0, len(texts), batch_size):
@@ -252,11 +264,14 @@ def embed_texts(openai_client: OpenAI, texts: list[str]) -> list[list[float]]:
         resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
         for d in resp.data:
             embeddings.append(d.embedding)
+        logger.debug("Embedded batch %d-%d", i, min(i + batch_size, len(texts)))
+    logger.info("Embedding complete: %d vectors", len(embeddings))
     return embeddings
 
 
 def get_relevant_chunks(conn, document_id: str, user_id: str, query_embedding: list[float]) -> list[str]:
     """Return top TOP_K chunk contents by similarity to query embedding."""
+    logger.info("Fetching relevant chunks: documentId=%s userId=%s top_k=%d", document_id, user_id, TOP_K)
     embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
     with conn.cursor() as cur:
         cur.execute(
@@ -266,11 +281,15 @@ def get_relevant_chunks(conn, document_id: str, user_id: str, query_embedding: l
              LIMIT %s""",
             (document_id, user_id, embedding_str, TOP_K),
         )
-        return [row[0] for row in cur.fetchall()]
+        rows = cur.fetchall()
+    result = [row[0] for row in rows]
+    logger.info("Relevant chunks: documentId=%s count=%d", document_id, len(result))
+    return result
 
 
 def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> dict:
     """Call OpenAI with Structured Outputs; return checklist dict."""
+    logger.info("Generating checklist: fileName=%s context_len=%d", file_name or "document", len(context))
     user_content = f"Contexto do documento ({file_name}):\n\n{context}\n\nExtraia o checklist em JSON."
     resp = openai_client.chat.completions.create(
         model=CHAT_MODEL,
@@ -288,7 +307,9 @@ def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> d
         },
     )
     raw = (resp.choices[0].message.content or "").strip()
-    return json.loads(raw)
+    data = json.loads(raw)
+    logger.info("Checklist generated: fileName=%s", file_name or "document")
+    return data
 
 
 def insert_checklist(
@@ -298,6 +319,7 @@ def insert_checklist(
     data: dict,
     document_id: str,
 ):
+    logger.info("Inserting checklist: documentId=%s userId=%s fileName=%s", document_id, user_id, file_name or "document")
     ed = data.get("edital") or {}
     orgao = ed.get("orgao") or None
     objeto = ed.get("objeto") or None
@@ -325,6 +347,7 @@ def insert_checklist(
             ),
         )
     conn.commit()
+    logger.info("Checklist inserted: documentId=%s checklistId=%s", document_id, checklist_id)
 
 
 def process_job(payload: dict):
@@ -332,9 +355,16 @@ def process_job(payload: dict):
     user_id = payload.get("userId")
     file_url = payload.get("fileUrl")
     file_name = payload.get("fileName", "document")
+    logger.info(
+        "Processing job: documentId=%s userId=%s fileName=%s",
+        document_id,
+        user_id,
+        file_name,
+    )
     if not document_id or not user_id or not file_url:
-        logger.error("Missing documentId, userId or fileUrl in job")
+        logger.error("Missing documentId, userId or fileUrl in job payload=%s", payload)
         return
+    logger.info("Opening DB connection to set status=processing")
     conn = get_conn()
     try:
         update_document_status(conn, document_id, "processing")
@@ -342,33 +372,41 @@ def process_job(payload: dict):
         conn.close()
     temp_path = None
     try:
+        logger.info("Downloading file for documentId=%s", document_id)
         temp_path = download_to_temp(file_url, file_name)
+        logger.info("Parsing file for documentId=%s", document_id)
         chunks_text = parse_file(temp_path, file_name)
         if not chunks_text:
             raise ValueError("No content extracted")
         openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
         if not openai_client:
             raise RuntimeError("OPENAI_API_KEY is not set")
+        logger.info("Embedding chunks for documentId=%s", document_id)
         embeddings = embed_texts(openai_client, chunks_text)
         pairs = list(zip(chunks_text, embeddings))
+        logger.info("Inserting chunks and generating checklist for documentId=%s", document_id)
         conn = get_conn()
         try:
             insert_chunks(conn, document_id, user_id, pairs)
             logger.info("Document %s: %d chunks inserted", document_id, len(pairs))
 
             # Generate checklist with Structured Outputs and insert
+            logger.info("Embedding checklist query for documentId=%s", document_id)
             query_embedding = embed_texts(openai_client, [CHECKLIST_QUERY])[0]
             relevant = get_relevant_chunks(conn, document_id, user_id, query_embedding)
             context = "\n\n".join(relevant)
             checklist_data = generate_checklist(openai_client, context, file_name)
             insert_checklist(conn, user_id, file_name, checklist_data, document_id)
-            logger.info("Document %s: checklist generated", document_id)
+            logger.info("Document %s: checklist generated and inserted", document_id)
 
+            logger.info("Setting documentId=%s status=done", document_id)
             update_document_status(conn, document_id, "done")
+            logger.info("Job completed successfully: documentId=%s", document_id)
         finally:
             conn.close()
     except Exception as e:
         logger.exception("Job failed for %s: %s", document_id, e)
+        logger.info("Setting documentId=%s status=failed", document_id)
         conn = get_conn()
         try:
             update_document_status(conn, document_id, "failed")
@@ -378,21 +416,28 @@ def process_job(payload: dict):
         if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)
+                logger.debug("Removed temp file: %s", temp_path)
             except Exception:
                 pass
 
 
 def main():
+    logger.info("Worker starting: REDIS_URL=%s QUEUE=%s", REDIS_URL, QUEUE_NAME)
     if not DATABASE_URL:
+        logger.error("DATABASE_URL is required")
         raise SystemExit("DATABASE_URL is required")
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY is not set; embedding/checklist will fail")
     r = redis.Redis.from_url(REDIS_URL)
-    logger.info("Worker listening on %s queue %s", REDIS_URL, QUEUE_NAME)
+    logger.info("Worker listening on queue %s (brpop timeout=30s)", QUEUE_NAME)
     while True:
         _, raw = r.brpop(QUEUE_NAME, timeout=30)
         if not raw:
             continue
+        logger.info("Job received from queue (payload_len=%d)", len(raw))
         try:
             payload = json.loads(raw)
+            logger.info("Job payload parsed, documentId=%s", payload.get("documentId"))
             process_job(payload)
         except json.JSONDecodeError as e:
             logger.error("Invalid JSON in job: %s", e)
