@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Document ingest worker: consumes Redis queue, downloads file from presigned URL,
-parses with open-source unstructured library, generates embeddings, stores in pgvector.
+parses with open-source unstructured library, uploads chunks to OpenAI vector store,
+and generates a checklist using semantic search over the vector store.
 Updates document status in Postgres.
 """
 import os
 import json
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,7 +25,6 @@ import redis
 from unstructured.partition.auto import partition
 from openai import OpenAI
 import psycopg2
-import pgvector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,8 +37,6 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "documents")
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
 CHAT_MODEL = "gpt-4o-mini"
 CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
 TOP_K = 10
@@ -186,32 +185,39 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
+def _log_query(query: str, params: tuple) -> None:
+    """Log the SQL query and parameters (truncate long values for readability)."""
+    def truncate(v, max_len: int = 80):
+        if isinstance(v, str) and len(v) > max_len:
+            return v[:max_len] + "..."
+        if isinstance(v, (list, tuple)) and len(v) > 5:
+            return f"<{type(v).__name__} len={len(v)}>"
+        return v
+    safe_params = tuple(truncate(p, 200) for p in params)
+    logger.info("SQL: %s", query.strip())
+    logger.info("SQL params: %s", safe_params)
+
+
 def update_document_status(conn, document_id: str, status: str):
     logger.info("Updating document status: documentId=%s status=%s", document_id, status)
+    query = 'UPDATE "Document" SET status = %s WHERE id = %s'
+    params = (status, document_id)
+    _log_query(query, params)
     with conn.cursor() as cur:
-        cur.execute(
-            'UPDATE "Document" SET status = %s WHERE id = %s',
-            (status, document_id),
-        )
+        cur.execute(query, params)
     conn.commit()
     logger.info("Document status updated: documentId=%s status=%s", document_id, status)
 
 
-def insert_chunks(conn, document_id: str, user_id: str, chunks: list[tuple[str, list[float]]]):
-    logger.info("Inserting chunks: documentId=%s userId=%s count=%d", document_id, user_id, len(chunks))
+def update_document_vector_store(conn, document_id: str, vector_store_id: str):
+    """Store the OpenAI vector store ID on the document."""
+    logger.info("Updating document vectorStoreId: documentId=%s", document_id)
+    query = 'UPDATE "Document" SET "vectorStoreId" = %s WHERE id = %s'
+    params = (vector_store_id, document_id)
+    _log_query(query, params)
     with conn.cursor() as cur:
-        for content, embedding in chunks:
-            chunk_id = str(uuid.uuid4())
-            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
-            cur.execute(
-                """
-                INSERT INTO "DocumentChunk" (id, "documentId", "userId", content, embedding)
-                VALUES (%s, %s, %s, %s, %s::vector)
-                """,
-                (chunk_id, document_id, user_id, content, embedding_str),
-            )
+        cur.execute(query, params)
     conn.commit()
-    logger.info("Chunks inserted: documentId=%s count=%d", document_id, len(chunks))
 
 
 def download_to_temp(file_url: str, file_name: str) -> str:
@@ -251,12 +257,12 @@ def _s3_client():
         return None
 
 
-def upload_debug_json(user_id: str, document_id: str, data: dict) -> None:
-    """Upload a JSON payload to the bucket for debugging (e.g. unstructured parse result)."""
+def upload_debug_json(user_id: str, document_id: str, data: dict, suffix: str = "unstructured-debug") -> None:
+    """Upload a JSON payload to the bucket for debugging (e.g. unstructured parse result, OpenAI responses)."""
     client = _s3_client()
     if not client:
         return
-    key = f"{user_id}/{document_id}-unstructured-debug.json"
+    key = f"{user_id}/{document_id}-{suffix}.json"
     try:
         body = json.dumps(data, ensure_ascii=False, indent=2)
         client.put_object(Bucket=MINIO_BUCKET, Key=key, Body=body.encode("utf-8"), ContentType="application/json")
@@ -296,46 +302,89 @@ def parse_file(file_path: str, file_name: str) -> tuple[list[str], dict]:
     return chunks, debug_payload
 
 
-def embed_texts(openai_client: OpenAI, texts: list[str]) -> list[list[float]]:
-    """Batch embed texts with OpenAI."""
-    if not texts:
-        logger.info("embed_texts: no texts, skipping")
-        return []
-    logger.info("Embedding %d texts (model=%s batch_size=100)", len(texts), EMBEDDING_MODEL)
-    embeddings = []
-    batch_size = 100
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
-        for d in resp.data:
-            embeddings.append(d.embedding)
-        logger.debug("Embedded batch %d-%d", i, min(i + batch_size, len(texts)))
-    logger.info("Embedding complete: %d vectors", len(embeddings))
-    return embeddings
+def create_vector_store_and_upload_chunks(
+    openai_client: OpenAI, document_id: str, chunks: list[str]
+) -> str:
+    """Create an OpenAI vector store, upload each chunk as a text file, wait until ready. Returns vector_store_id."""
+    if not chunks:
+        raise ValueError("No chunks to upload")
+    logger.info("Creating vector store for documentId=%s with %d chunks", document_id, len(chunks))
+    vs = openai_client.beta.vector_stores.create(name=f"doc-{document_id}")
+    vector_store_id = vs.id
+    temp_paths = []
+    try:
+        for i, text in enumerate(chunks):
+            fd, path = tempfile.mkstemp(suffix=".txt")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+                temp_paths.append(path)
+                with open(path, "rb") as f:
+                    file = openai_client.files.create(file=f, purpose="assistants")
+                openai_client.beta.vector_stores.files.create(
+                    vector_store_id=vector_store_id, file_id=file.id
+                )
+            except Exception:
+                os.unlink(path)
+                if path in temp_paths:
+                    temp_paths.remove(path)
+                raise
+        _wait_for_vector_store_ready(openai_client, vector_store_id)
+        return vector_store_id
+    finally:
+        for p in temp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
-def get_relevant_chunks(conn, document_id: str, user_id: str, query_embedding: list[float]) -> list[str]:
-    """Return top TOP_K chunk contents by similarity to query embedding."""
-    logger.info("Fetching relevant chunks: documentId=%s userId=%s top_k=%d", document_id, user_id, TOP_K)
-    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT content FROM "DocumentChunk"
-             WHERE "documentId" = %s AND "userId" = %s
-             ORDER BY embedding <-> %s::vector
-             LIMIT %s""",
-            (document_id, user_id, embedding_str, TOP_K),
-        )
-        rows = cur.fetchall()
-    result = [row[0] for row in rows]
-    logger.info("Relevant chunks: documentId=%s count=%d", document_id, len(result))
-    return result
+def _wait_for_vector_store_ready(openai_client: OpenAI, vector_store_id: str, max_wait_sec: int = 600):
+    """Poll vector store until status is completed or failed."""
+    start = time.monotonic()
+    while (time.monotonic() - start) < max_wait_sec:
+        vs = openai_client.beta.vector_stores.retrieve(vector_store_id)
+        status = getattr(vs, "status", None)
+        counts = getattr(vs, "file_counts", None)
+        total = getattr(counts, "total", 0) if counts else 0
+        completed = getattr(counts, "completed", 0) if counts else 0
+        failed = getattr(counts, "failed", 0) if counts else 0
+        if status == "completed" or (total and total == completed):
+            logger.info("Vector store %s ready (completed=%d)", vector_store_id, completed)
+            return
+        if status == "expired" or failed:
+            raise RuntimeError(f"Vector store {vector_store_id} failed or expired: status={status}, file_counts={getattr(counts, '__dict__', counts)}")
+        logger.debug("Vector store %s status=%s completed=%d/%d", vector_store_id, status, completed, total)
+        time.sleep(2)
+    raise TimeoutError(f"Vector store {vector_store_id} did not complete within {max_wait_sec}s")
 
 
-def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> dict:
-    """Call OpenAI with Structured Outputs; return checklist dict."""
+def search_vector_store(
+    openai_client: OpenAI, vector_store_id: str, query: str, max_results: int = TOP_K
+) -> list[str]:
+    """Search the vector store with a natural language query. Returns list of chunk texts."""
+    logger.info("Searching vector store: vector_store_id=%s max_results=%d", vector_store_id, max_results)
+    resp = openai_client.beta.vector_stores.search(
+        vector_store_id=vector_store_id,
+        query=query,
+        max_num_results=max_results,
+    )
+    texts = []
+    for item in getattr(resp, "data", []):
+        for content_block in getattr(item, "content", []):
+            if getattr(content_block, "type", None) == "text":
+                t = getattr(content_block, "text", None)
+                if t and t.strip():
+                    texts.append(t.strip())
+    logger.info("Vector store search returned %d chunks", len(texts))
+    return texts
+
+
+def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
+    """Call OpenAI with Structured Outputs; return (checklist dict, debug payload)."""
     logger.info("Generating checklist: fileName=%s context_len=%d", file_name or "document", len(context))
     user_content = f"Contexto do documento ({file_name}):\n\n{context}\n\nExtraia o checklist em JSON."
+    logger.info("Checklist user_content (len=%d): %s", len(user_content), user_content)
     resp = openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[
@@ -353,8 +402,20 @@ def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> d
     )
     raw = (resp.choices[0].message.content or "").strip()
     data = json.loads(raw)
+    usage = getattr(resp, "usage", None)
+    openai_debug = {
+        "model": getattr(resp, "model", CHAT_MODEL),
+        "usage": {
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        } if usage else None,
+        "user_content": user_content,
+        "raw_content": raw,
+        "parsed_checklist": data,
+    }
     logger.info("Checklist generated: fileName=%s", file_name or "document")
-    return data
+    return data, openai_debug
 
 
 def insert_checklist(
@@ -373,24 +434,24 @@ def insert_checklist(
     if pontuacao is not None and not isinstance(pontuacao, int):
         pontuacao = int(pontuacao) if pontuacao else None
     checklist_id = str(uuid.uuid4())
-    with conn.cursor() as cur:
-        cur.execute(
-            """
+    query = """
             INSERT INTO "Checklist" (id, "userId", file_name, data, pontuacao, orgao, objeto, valor_total, "documentId")
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                checklist_id,
-                user_id,
-                file_name,
-                json.dumps(data),
-                pontuacao,
-                orgao,
-                objeto,
-                valor_total,
-                document_id,
-            ),
-        )
+            """
+    params = (
+        checklist_id,
+        user_id,
+        file_name,
+        json.dumps(data),
+        pontuacao,
+        orgao,
+        objeto,
+        valor_total,
+        document_id,
+    )
+    _log_query(query, params)
+    with conn.cursor() as cur:
+        cur.execute(query, params)
     conn.commit()
     logger.info("Checklist inserted: documentId=%s checklistId=%s", document_id, checklist_id)
 
@@ -427,21 +488,20 @@ def process_job(payload: dict):
         openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
         if not openai_client:
             raise RuntimeError("OPENAI_API_KEY is not set")
-        logger.info("Embedding chunks for documentId=%s", document_id)
-        embeddings = embed_texts(openai_client, chunks_text)
-        pairs = list(zip(chunks_text, embeddings))
-        logger.info("Inserting chunks and generating checklist for documentId=%s", document_id)
+        logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
+        vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
+        logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
         conn = get_conn()
         try:
-            insert_chunks(conn, document_id, user_id, pairs)
-            logger.info("Document %s: %d chunks inserted", document_id, len(pairs))
+            update_document_vector_store(conn, document_id, vector_store_id)
 
-            # Generate checklist with Structured Outputs and insert
-            logger.info("Embedding checklist query for documentId=%s", document_id)
-            query_embedding = embed_texts(openai_client, [CHECKLIST_QUERY])[0]
-            relevant = get_relevant_chunks(conn, document_id, user_id, query_embedding)
+            # Generate checklist: search vector store and fill structured checklist
+            logger.info("Searching vector store for checklist context: documentId=%s", document_id)
+            relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
             context = "\n\n".join(relevant)
-            checklist_data = generate_checklist(openai_client, context, file_name)
+            checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
+            openai_debug = {"checklist": checklist_openai_debug}
+            upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
             insert_checklist(conn, user_id, file_name, checklist_data, document_id)
             logger.info("Document %s: checklist generated and inserted", document_id)
 
@@ -473,7 +533,7 @@ def main():
         logger.error("DATABASE_URL is required")
         raise SystemExit("DATABASE_URL is required")
     if not OPENAI_API_KEY:
-        logger.warning("OPENAI_API_KEY is not set; embedding/checklist will fail")
+        logger.warning("OPENAI_API_KEY is not set; vector store and checklist will fail")
     r = redis.Redis.from_url(REDIS_URL)
     logger.info("Worker listening on queue %s (brpop timeout=30s)", QUEUE_NAME)
     while True:

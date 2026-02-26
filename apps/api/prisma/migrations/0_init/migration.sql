@@ -1,6 +1,3 @@
--- Enable pgvector (required for DocumentChunk.embedding)
-CREATE EXTENSION IF NOT EXISTS vector;
-
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
@@ -81,22 +78,10 @@ CREATE TABLE "Document" (
     "file_name" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'pending',
     "storageKey" TEXT,
+    "vectorStoreId" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Document_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable DocumentChunk
-CREATE TABLE "DocumentChunk" (
-    "id" TEXT NOT NULL,
-    "documentId" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
-    "content" TEXT NOT NULL,
-    "embedding" vector(1536),
-    "metadata" JSONB,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "DocumentChunk_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
@@ -111,14 +96,9 @@ CREATE INDEX "Checklist_created_at_idx" ON "Checklist"("created_at" DESC);
 CREATE INDEX "Document_userId_idx" ON "Document"("userId");
 CREATE INDEX "Document_status_idx" ON "Document"("status");
 
-CREATE INDEX "DocumentChunk_documentId_idx" ON "DocumentChunk"("documentId");
-CREATE INDEX "DocumentChunk_userId_idx" ON "DocumentChunk"("userId");
-
 -- AddForeignKey
 ALTER TABLE "Session" ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Checklist" ADD CONSTRAINT "Checklist_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Checklist" ADD CONSTRAINT "Checklist_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "Document" ADD CONSTRAINT "Document_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "DocumentChunk" ADD CONSTRAINT "DocumentChunk_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "DocumentChunk" ADD CONSTRAINT "DocumentChunk_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;

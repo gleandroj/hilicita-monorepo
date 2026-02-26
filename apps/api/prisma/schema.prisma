@@ -20,7 +20,6 @@ model User {
   accounts      Account[]
   checklists    Checklist[]
   documents     Document[]
-  documentChunks DocumentChunk[]
 }
 
 model Session {
@@ -77,31 +76,16 @@ model Checklist {
 }
 
 model Document {
-  id          String      @id @default(uuid())
-  userId      String
-  file_name   String
-  status      String      @default("pending") // pending | processing | done | failed
-  storageKey  String?     // MinIO object key
-  created_at  DateTime    @default(now())
-  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  chunks      DocumentChunk[]
-  checklist   Checklist?
+  id             String      @id @default(uuid())
+  userId         String
+  file_name      String
+  status         String      @default("pending") // pending | processing | done | failed
+  storageKey     String?     // MinIO object key
+  vectorStoreId  String?     // OpenAI vector store ID for semantic search
+  created_at     DateTime    @default(now())
+  user           User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checklist      Checklist?
 
   @@index([userId])
   @@index([status])
-}
-
-model DocumentChunk {
-  id          String   @id @default(uuid())
-  documentId  String
-  userId      String
-  content     String   @db.Text
-  embedding   Unsupported("vector(1536)")?
-  metadata    Json?
-  created_at  DateTime @default(now())
-  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([documentId])
-  @@index([userId])
 }
