@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/hooks/use-toast";
-import { useAuth } from "@/hooks/useAuth";
 import Header from "@/components/Header";
 import PdfUploader from "@/components/PdfUploader";
 import ProtectedRoute from "@/components/ProtectedRoute";
@@ -24,7 +23,6 @@ function HomeContent() {
   const router = useRouter();
   const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
-  const { user } = useAuth();
 
   const handleExtract = async (file: File) => {
     setIsProcessing(true);
