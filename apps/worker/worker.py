@@ -435,9 +435,10 @@ def main():
     r = redis.Redis.from_url(REDIS_URL)
     logger.info("Worker listening on queue %s (brpop timeout=30s)", QUEUE_NAME)
     while True:
-        _, raw = r.brpop(QUEUE_NAME, timeout=30)
-        if not raw:
+        result = r.brpop(QUEUE_NAME, timeout=30)
+        if result is None:
             continue
+        _, raw = result
         logger.info("Job received from queue (payload_len=%d)", len(raw))
         try:
             payload = json.loads(raw)
