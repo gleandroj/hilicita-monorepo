@@ -24,7 +24,6 @@ interface SavedChecklist {
 
 function ChecklistDetailContent() {
   const params = useParams();
-  const router = useRouter();
   const id = params?.id as string | undefined;
   const [checklist, setChecklist] = useState<SavedChecklist | null>(null);
   const [loading, setLoading] = useState(true);

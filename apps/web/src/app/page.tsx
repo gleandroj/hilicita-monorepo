@@ -1,15 +1,16 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import Header from "@/components/Header";
 import PdfUploader from "@/components/PdfUploader";
-import ChecklistResult, { type ChecklistData } from "@/components/ChecklistResult";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { motion } from "framer-motion";
-import { FileText, Zap, Shield, BarChart3 } from "lucide-react";
+import { Zap, Shield, BarChart3 } from "lucide-react";
 import { API_URL } from "@/lib/api";
+import type { ChecklistData } from "@/components/ChecklistResult";
 
 export default function Home() {
   return (
@@ -20,15 +21,13 @@ export default function Home() {
 }
 
 function HomeContent() {
+  const router = useRouter();
   const [isProcessing, setIsProcessing] = useState(false);
-  const [checklistData, setChecklistData] = useState<ChecklistData | null>(null);
-  const [fileName, setFileName] = useState("");
   const { toast } = useToast();
   const { user } = useAuth();
 
   const handleExtract = async (file: File) => {
     setIsProcessing(true);
-    setFileName(file.name);
 
     try {
       const formData = new FormData();
@@ -82,15 +81,18 @@ function HomeContent() {
         throw new Error((err as { message?: string }).message ?? "Falha ao obter checklist");
       }
 
-      const { checklist } = (await checklistRes.json()) as { checklist: ChecklistData };
-      setChecklistData(checklist);
+      const body = (await checklistRes.json()) as { checklist: ChecklistData; checklistId?: string };
+      const checklistId = body.checklistId;
 
-      toast({
-        title: "Extração concluída!",
-        description: user
-          ? "O checklist foi gerado e salvo no histórico."
-          : "O checklist foi gerado. Faça login para salvar.",
-      });
+      if (checklistId) {
+        toast({ title: "Extração concluída!", description: "Redirecionando para o checklist..." });
+        router.push(`/historico/${checklistId}`);
+      } else {
+        toast({
+          title: "Extração concluída!",
+          description: "O checklist foi gerado. Acesse o Histórico para visualizar.",
+        });
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Não foi possível processar o edital. Tente novamente.";
       toast({
@@ -108,53 +110,40 @@ function HomeContent() {
       <Header />
 
       <main className="container mx-auto px-6 py-8">
-        {!checklistData ? (
-          <div className="mx-auto max-w-2xl space-y-10">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="text-center space-y-4"
-            >
-              <h2 className="font-display text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
-                Extraia editais em{" "}
-                <span className="text-primary">minutos</span>
-              </h2>
-              <p className="text-lg text-muted-foreground max-w-lg mx-auto">
-                Faça upload do PDF ou CSV do edital e a IA irá gerar automaticamente o checklist com todos os requisitos e documentos necessários.
-              </p>
-            </motion.div>
+        <div className="mx-auto max-w-2xl space-y-10">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center space-y-4"
+          >
+            <h2 className="font-display text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+              Extraia editais em{" "}
+              <span className="text-primary">minutos</span>
+            </h2>
+            <p className="text-lg text-muted-foreground max-w-lg mx-auto">
+              Faça upload do PDF ou CSV do edital e a IA irá gerar automaticamente o checklist com todos os requisitos e documentos necessários.
+            </p>
+          </motion.div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-            >
-              <PdfUploader onExtract={handleExtract} isProcessing={isProcessing} />
-            </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+          >
+            <PdfUploader onExtract={handleExtract} isProcessing={isProcessing} />
+          </motion.div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2 }}
-              className="grid grid-cols-1 gap-4 sm:grid-cols-3"
-            >
-              <FeatureCard icon={<Zap className="h-5 w-5" />} title="Extração Rápida" description="De horas para minutos com IA" />
-              <FeatureCard icon={<Shield className="h-5 w-5" />} title="95% de Precisão" description="Correspondência automática de documentos" />
-              <FeatureCard icon={<BarChart3 className="h-5 w-5" />} title="Pontuação" description="Avaliação automática de oportunidades" />
-            </motion.div>
-          </div>
-        ) : (
-          <div className="mx-auto max-w-4xl space-y-6">
-            <button
-              onClick={() => setChecklistData(null)}
-              className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors font-medium"
-            >
-              <FileText className="h-4 w-4" />
-              ← Novo edital
-            </button>
-            <ChecklistResult data={checklistData} fileName={fileName} />
-          </div>
-        )}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className="grid grid-cols-1 gap-4 sm:grid-cols-3"
+          >
+            <FeatureCard icon={<Zap className="h-5 w-5" />} title="Extração Rápida" description="De horas para minutos com IA" />
+            <FeatureCard icon={<Shield className="h-5 w-5" />} title="95% de Precisão" description="Correspondência automática de documentos" />
+            <FeatureCard icon={<BarChart3 className="h-5 w-5" />} title="Pontuação" description="Avaliação automática de oportunidades" />
+          </motion.div>
+        </div>
       </main>
     </div>
   );
