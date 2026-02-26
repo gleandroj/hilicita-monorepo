@@ -6,6 +6,14 @@ Updates document status in Postgres.
 """
 import os
 import json
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from worker directory (or repo root when run from monorepo)
+_env_dir = Path(__file__).resolve().parent
+load_dotenv(_env_dir / ".env")
+load_dotenv(_env_dir.parent.parent / ".env")
 import uuid
 import logging
 import tempfile
