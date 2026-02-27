@@ -1,0 +1,142 @@
+# Render Blueprint: hilicita-monorepo
+# Deploys: API (NestJS), Web (Next.js), Worker (Python), MinIO (private), Postgres, Redis (Key Value)
+# After first sync, set in Dashboard: OPENAI_API_KEY, BETTER_AUTH_SECRET, Google SSO (optional), and MinIO MINIO_ROOT_USER if you override default.
+
+databases:
+  - name: hilicita-db
+    databaseName: hilicita
+    plan: basic-256mb
+    region: oregon
+
+services:
+  # Redis (Render Key Value) for document ingest queue
+  - type: keyvalue
+    name: hilicita-redis
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: everywhere
+    plan: starter
+    maxmemoryPolicy: noeviction
+
+  # MinIO (S3-compatible private storage for PDFs/CSVs)
+  - type: pserv
+    name: minio
+    runtime: image
+    image:
+      url: docker.io/minio/minio:latest
+    dockerCommand: 'sh -c "minio server /data --address \":$PORT\""'
+    envVars:
+      - key: MINIO_ROOT_USER
+        sync: false
+      - key: MINIO_ROOT_PASSWORD
+        generateValue: true
+    disk:
+      name: minio-data
+      mountPath: /data
+      sizeGB: 10
+
+  # API (NestJS)
+  - type: web
+    name: api
+    runtime: node
+    region: oregon
+    buildCommand: npm install && cd apps/api && npx prisma generate && cd ../.. && npx turbo run build --filter=api
+    startCommand: cd apps/api && node dist/main
+    preDeployCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma migrate deploy
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hilicita-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: hilicita-redis
+          type: keyvalue
+          property: connectionString
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      - key: BETTER_AUTH_TRUSTED_ORIGINS
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        fromService:
+          name: minio
+          type: pserv
+          envVarKey: MINIO_ROOT_USER
+      - key: MINIO_SECRET_KEY
+        fromService:
+          name: minio
+          type: pserv
+          envVarKey: MINIO_ROOT_PASSWORD
+      - key: MINIO_BUCKET
+        value: documents
+      - key: MINIO_HOST
+        fromService:
+          name: minio
+          type: pserv
+          property: host
+      - key: MINIO_PORT
+        fromService:
+          name: minio
+          type: pserv
+          property: port
+
+  # Web (Next.js)
+  - type: web
+    name: web
+    runtime: node
+    region: oregon
+    buildCommand: npm install && npx turbo run build --filter=web
+    startCommand: cd apps/web && npm run start
+    envVars:
+      - key: BETTER_AUTH_URL
+        sync: false
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+
+  # Background worker (Python)
+  - type: worker
+    name: worker
+    runtime: python
+    region: oregon
+    rootDir: apps/worker
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hilicita-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: hilicita-redis
+          type: keyvalue
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MINIO_ACCESS_KEY
+        fromService:
+          name: minio
+          type: pserv
+          envVarKey: MINIO_ROOT_USER
+      - key: MINIO_SECRET_KEY
+        fromService:
+          name: minio
+          type: pserv
+          envVarKey: MINIO_ROOT_PASSWORD
+      - key: MINIO_BUCKET
+        value: documents
+      - key: MINIO_HOST
+        fromService:
+          name: minio
+          type: pserv
+          property: host
+      - key: MINIO_PORT
+        fromService:
+          name: minio
+          type: pserv
+          property: port
