@@ -1,11 +1,12 @@
-# Render Blueprint: hilicita-monorepo
+# Render Blueprint: hilicita-monorepo (free tier where available)
 # Deploys: API (NestJS), Web (Next.js), Worker (Python), MinIO (private), Postgres, Redis (Key Value)
 # After first sync, set in Dashboard: OPENAI_API_KEY, BETTER_AUTH_SECRET, Google SSO (optional), and MinIO MINIO_ROOT_USER if you override default.
+# Note: Render free tier not available for background workers or private services (worker uses starter; MinIO uses starter + disk).
 
 databases:
   - name: hilicita-db
     databaseName: hilicita
-    plan: basic-256mb
+    plan: free
     region: oregon
 
 services:
@@ -15,10 +16,10 @@ services:
     ipAllowList:
       - source: 0.0.0.0/0
         description: everywhere
-    plan: starter
+    plan: free
     maxmemoryPolicy: noeviction
 
-  # MinIO (S3-compatible private storage for PDFs/CSVs)
+  # MinIO (S3-compatible private storage for PDFs/CSVs). No free plan for pserv; minimal disk for cost.
   - type: pserv
     name: minio
     runtime: image
@@ -33,13 +34,14 @@ services:
     disk:
       name: minio-data
       mountPath: /data
-      sizeGB: 10
+      sizeGB: 1
 
   # API (NestJS)
   - type: web
     name: api
     runtime: node
     region: oregon
+    plan: free
     buildCommand: npm install && cd apps/api && npx prisma generate && cd ../.. && npx turbo run build --filter=api
     startCommand: cd apps/api && node dist/main
     preDeployCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma migrate deploy
@@ -90,6 +92,7 @@ services:
     name: web
     runtime: node
     region: oregon
+    plan: free
     buildCommand: npm install && npx turbo run build --filter=web
     startCommand: cd apps/web && npm run start
     envVars:
@@ -98,11 +101,12 @@ services:
       - key: NEXT_PUBLIC_API_URL
         sync: false
 
-  # Background worker (Python)
+  # Background worker (Python). Render has no free plan for workers; uses starter by default.
   - type: worker
     name: worker
     runtime: python
     region: oregon
+    plan: starter
     rootDir: apps/worker
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
