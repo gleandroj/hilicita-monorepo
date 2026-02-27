@@ -47,12 +47,48 @@ TOP_K = 10
 # --- Retrieval-driven block extraction (default for checklist blocks) ---
 CHUNK_MIN_CHARS = 800
 CHUNK_MAX_CHARS = 1200
+CHUNK_OVERLAP_CHARS = 150  # overlap to avoid cutting clauses (e.g. "apenas na assinatura" on next line)
 EMBEDDING_MODEL = "text-embedding-3-large"
 TOP_K_RETRIEVAL = 12  # 8–15 per block
 EVIDENCE_PROMPT_SUFFIX = """
+Use ONLY the provided excerpts.
+If information is missing: return empty values AND evidencia fields with empty strings / null page.
+Do not infer or guess.
+For every non-empty value, include evidencia.trecho as a literal quote (max 300 chars) and evidencia.ref (e.g., 'Item 7.3.5', 'Cláusula 4', 'p. 12').
+"""
 
-Use ONLY the provided excerpts. If information is missing, return empty values. Do not infer or guess.
-Every extracted field must be traceable to text evidence."""
+# Reusable JSON Schema defs for evidence-oriented extraction (schemaVersion 2)
+SCHEMA_DEFS = {
+    "Evidence": {
+        "type": "object",
+        "properties": {
+            "trecho": {"type": "string"},
+            "ref": {"type": "string"},
+            "page": {"type": ["integer", "null"]},
+        },
+        "required": ["trecho", "ref", "page"],
+        "additionalProperties": False,
+    },
+    "Field": {
+        "type": "object",
+        "properties": {
+            "valor": {"type": "string"},
+            "evidencia": {"$ref": "#/$defs/Evidence"},
+        },
+        "required": ["valor", "evidencia"],
+        "additionalProperties": False,
+    },
+    "BoolField": {
+        "type": "object",
+        "properties": {
+            "valor": {"type": "boolean"},
+            "informado": {"type": "boolean"},
+            "evidencia": {"$ref": "#/$defs/Evidence"},
+        },
+        "required": ["valor", "informado", "evidencia"],
+        "additionalProperties": False,
+    },
+}
 
 # Heading patterns for section_hint (Brazilian bidding documents): (pattern, label)
 HEADING_PATTERNS = [
@@ -66,6 +102,17 @@ HEADING_PATTERNS = [
     (re.compile(r"\bPRAZOS\b", re.IGNORECASE), "PRAZOS"),
     (re.compile(r"\bIDENTIFICAÇÃO\b", re.IGNORECASE), "IDENTIFICAÇÃO"),
     (re.compile(r"\bSESSÃO\b", re.IGNORECASE), "SESSÃO"),
+    (re.compile(r"\bDO\s+OBJETO\b", re.IGNORECASE), "DO OBJETO"),
+    (re.compile(r"\bDA\s+PROPOSTA\b", re.IGNORECASE), "DA PROPOSTA"),
+    (re.compile(r"\bDO\s+JULGAMENTO\b", re.IGNORECASE), "DO JULGAMENTO"),
+    (re.compile(r"\bDO\s+PAGAMENTO\b", re.IGNORECASE), "DO PAGAMENTO"),
+    (re.compile(r"\bDOS\s+RECURSOS\b", re.IGNORECASE), "DOS RECURSOS"),
+    (re.compile(r"\bDA\s+IMPUGNAÇÃO\b", re.IGNORECASE), "DA IMPUGNAÇÃO"),
+    (re.compile(r"\bDOS\s+ESCLARECIMENTOS\b", re.IGNORECASE), "DOS ESCLARECIMENTOS"),
+    (re.compile(r"\bMODO\s+DE\s+DISPUTA\b", re.IGNORECASE), "MODO DE DISPUTA"),
+    (re.compile(r"\bCRITÉRIO\s+DE\s+JULGAMENTO\b", re.IGNORECASE), "CRITÉRIO DE JULGAMENTO"),
+    (re.compile(r"\bANEXO\b", re.IGNORECASE), "ANEXO"),
+    (re.compile(r"\bTERMO\s+DE\s+REFERÊNCIA\b", re.IGNORECASE), "TERMO DE REFERÊNCIA"),
 ]
 
 # When False, checklist uses full document text in the prompt; vector store is skipped (legacy).
@@ -97,9 +144,11 @@ Regras gerais: use string vazia quando não encontrar a informação; use false 
 
 7) ANÁLISE: Pontuação 0-100 (valor do contrato, clareza, viabilidade, prazos) e recomendação curta."""
 
+# Canonical storage shape (v1-compat: flat values + evidence + requisitos). Used by single-call path and as merge target.
 CHECKLIST_JSON_SCHEMA = {
     "type": "object",
     "properties": {
+        "schemaVersion": {"type": "integer"},
         "edital": {
             "type": "object",
             "properties": {
@@ -140,19 +189,19 @@ CHECKLIST_JSON_SCHEMA = {
             "properties": {
                 "enviarPropostaAte": {
                     "type": "object",
-                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}, "raw": {"type": "string"}},
                     "required": ["data", "horario"],
                     "additionalProperties": False,
                 },
                 "esclarecimentosAte": {
                     "type": "object",
-                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}, "raw": {"type": "string"}},
                     "required": ["data", "horario"],
                     "additionalProperties": False,
                 },
                 "impugnacaoAte": {
                     "type": "object",
-                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                    "properties": {"data": {"type": "string"}, "horario": {"type": "string"}, "raw": {"type": "string"}},
                     "required": ["data", "horario"],
                     "additionalProperties": False,
                 },
@@ -163,6 +212,22 @@ CHECKLIST_JSON_SCHEMA = {
                 "contatoEsclarecimentoImpugnacao",
             ],
             "additionalProperties": False,
+        },
+        "requisitos": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "categoria": {"type": "string"},
+                    "referencia": {"type": "string"},
+                    "local": {"type": "string"},
+                    "descricao": {"type": "string"},
+                    "obrigatorio": {"type": "boolean"},
+                    "etapa": {"type": "string"},
+                    "condicao": {"type": "string"},
+                    "evidencia": {"type": "object"},
+                },
+            },
         },
         "documentos": {
             "type": "array",
@@ -204,8 +269,12 @@ CHECKLIST_JSON_SCHEMA = {
                 "diferencaEntreLances": {"type": "string"},
                 "horasPropostaAjustada": {"type": "string"},
                 "abertoFechado": {"type": "string"},
+                "criterioJulgamento": {"type": "string"},
+                "tempoDisputa": {"type": "string"},
+                "tempoRandomico": {"type": "string"},
+                "faseLances": {"type": "string"},
+                "prazoPosLance": {"type": "string"},
             },
-            "required": ["diferencaEntreLances", "horasPropostaAjustada", "abertoFechado"],
             "additionalProperties": False,
         },
         "outrosEdital": {
@@ -214,6 +283,7 @@ CHECKLIST_JSON_SCHEMA = {
             "required": ["mecanismoPagamento"],
             "additionalProperties": False,
         },
+        "evidence": {"type": "object"},
         "responsavelAnalise": {"type": "string"},
         "pontuacao": {"type": "integer"},
         "recomendacao": {"type": "string"},
@@ -227,72 +297,55 @@ CHECKLIST_JSON_SCHEMA = {
 }
 
 # --- Per-block extraction: schema + prompt + retrieval query for each checklist section ---
+def _edital_block_schema():
+    fields = ["licitacao", "edital", "orgao", "objeto", "dataSessao", "portal", "numeroProcessoInterno",
+              "totalReais", "valorEnergia", "volumeEnergia", "vigenciaContrato", "modalidadeConcessionaria", "prazoInicioInjecao"]
+    return {
+        "$defs": SCHEMA_DEFS,
+        "type": "object",
+        "properties": {
+            "edital": {
+                "type": "object",
+                "properties": {f: {"$ref": "#/$defs/Field"} for f in fields},
+                "required": fields,
+                "additionalProperties": False,
+            },
+        },
+        "required": ["edital"],
+        "additionalProperties": False,
+    }
+
 CHECKLIST_BLOCKS = [
     {
         "key": "edital",
         "query": "órgão edital número processo objeto sessão portal licitação valor total vigência modalidade",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "edital": {
-                    "type": "object",
-                    "properties": {
-                        "licitacao": {"type": "string"},
-                        "edital": {"type": "string"},
-                        "orgao": {"type": "string"},
-                        "objeto": {"type": "string"},
-                        "dataSessao": {"type": "string"},
-                        "portal": {"type": "string"},
-                        "numeroProcessoInterno": {"type": "string"},
-                        "totalReais": {"type": "string"},
-                        "valorEnergia": {"type": "string"},
-                        "volumeEnergia": {"type": "string"},
-                        "vigenciaContrato": {"type": "string"},
-                        "modalidadeConcessionaria": {"type": "string"},
-                        "prazoInicioInjecao": {"type": "string"},
-                    },
-                    "required": [
-                        "licitacao", "edital", "orgao", "objeto", "dataSessao", "portal",
-                        "numeroProcessoInterno", "totalReais", "valorEnergia", "volumeEnergia",
-                        "vigenciaContrato", "modalidadeConcessionaria", "prazoInicioInjecao",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-            "required": ["edital"],
-            "additionalProperties": False,
-        },
+        "schema": _edital_block_schema(),
         "system_prompt": """Você é um especialista em licitações brasileiras. Sua tarefa é extrair APENAS os dados de IDENTIFICAÇÃO DO EDITAL.
 
-No contexto do documento, localize e preencha:
-- licitacao: órgão ou entidade realizadora (ex.: PREFEITURA DE RECIFE)
-- edital: número do edital (ex.: 026/2025-GC-SEPLAG-007)
-- orgao: órgão/administração (ex.: Prefeitura da Cidade do Recife)
-- objeto: resumo do objeto da licitação (registro de preços, fornecimento, etc.)
-- dataSessao: data e horário da sessão (formato DD/MM/AAAA HH:MM ou similar; ex.: 10/02/2026 09:00:00)
-- portal: nome do portal (ex.: Licitar Digital)
-- numeroProcessoInterno: número do processo/ADM (ex.: 81800)
-- totalReais: valor total em R$ (número e/ou por extenso quando houver)
-- valorEnergia, volumeEnergia: quando o edital for de energia
-- vigenciaContrato: prazo (ex.: 12 meses, Registro de Preço)
-- modalidadeConcessionaria: modalidade e concessionária (ex.: Neoenergia Pernambuco)
-- prazoInicioInjecao: quando aplicável
+Para CADA campo, preencha valor (string; vazio se não encontrar) e evidencia (trecho: citação literal até 300 chars; ref: ex. Item 7.3.5, Cláusula 4, p. 12; page: número ou null).
 
-Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""" + EVIDENCE_PROMPT_SUFFIX,
+- licitacao: órgão ou entidade realizadora
+- edital: número do edital
+- orgao, objeto, dataSessao, portal, numeroProcessoInterno
+- totalReais: valor total em R$
+- valorEnergia, volumeEnergia, vigenciaContrato, modalidadeConcessionaria, prazoInicioInjecao quando aplicável
+
+Use string vazia em valor e evidencia com trecho/ref vazios e page null quando não encontrar. Não invente dados.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "modalidade_participacao",
         "query": "modalidade licitação pregão concorrência consórcio MPE microempresa participação",
         "schema": {
+            "$defs": SCHEMA_DEFS,
             "type": "object",
             "properties": {
-                "modalidadeLicitacao": {"type": "string"},
+                "modalidadeLicitacao": {"$ref": "#/$defs/Field"},
                 "participacao": {
                     "type": "object",
                     "properties": {
-                        "permiteConsorcio": {"type": "boolean"},
-                        "beneficiosMPE": {"type": "boolean"},
-                        "itemEdital": {"type": "string"},
+                        "permiteConsorcio": {"$ref": "#/$defs/BoolField"},
+                        "beneficiosMPE": {"$ref": "#/$defs/BoolField"},
+                        "itemEdital": {"$ref": "#/$defs/Field"},
                     },
                     "required": ["permiteConsorcio", "beneficiosMPE", "itemEdital"],
                     "additionalProperties": False,
@@ -303,17 +356,18 @@ Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""
         },
         "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS MODALIDADE E PARTICIPAÇÃO.
 
-- modalidadeLicitacao: tipo da licitação (ex.: Pregão Eletrônico, Concorrência).
-- participacao.permiteConsorcio: true somente se o edital PERMITE participação em consórcio; false se não permite ou não mencionar.
-- participacao.beneficiosMPE: true somente se há benefícios a microempresa/pequeno porte; false caso contrário.
-- participacao.itemEdital: referência ou trecho do edital que trata de participação/consórcio/MPE (ou string vazia).
+- modalidadeLicitacao: Field com valor (ex.: Pregão Eletrônico) e evidencia.
+- participacao.permiteConsorcio: BoolField. valor=true só se o edital PERMITE consórcio; valor=false se proíbe. Se não houver menção explícita: informado=false, valor=false.
+- participacao.beneficiosMPE: BoolField. valor=true só se há benefícios a MPE; informado=false se não mencionar.
+- participacao.itemEdital: Field com referência do edital (item/cláusula) e evidencia.
 
-Use false para booleanos quando não aplicável ou não informado.""" + EVIDENCE_PROMPT_SUFFIX,
+Para cada BoolField preencha evidencia (trecho, ref, page).""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "prazos",
         "query": "prazo proposta esclarecimento impugnação data horário sessão envio limite",
         "schema": {
+            "$defs": SCHEMA_DEFS,
             "type": "object",
             "properties": {
                 "prazos": {
@@ -321,23 +375,38 @@ Use false para booleanos quando não aplicável ou não informado.""" + EVIDENCE
                     "properties": {
                         "enviarPropostaAte": {
                             "type": "object",
-                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
-                            "required": ["data", "horario"],
+                            "properties": {
+                                "data": {"type": "string"},
+                                "horario": {"type": "string"},
+                                "raw": {"type": "string"},
+                                "evidencia": {"$ref": "#/$defs/Evidence"},
+                            },
+                            "required": ["data", "horario", "raw", "evidencia"],
                             "additionalProperties": False,
                         },
                         "esclarecimentosAte": {
                             "type": "object",
-                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
-                            "required": ["data", "horario"],
+                            "properties": {
+                                "data": {"type": "string"},
+                                "horario": {"type": "string"},
+                                "raw": {"type": "string"},
+                                "evidencia": {"$ref": "#/$defs/Evidence"},
+                            },
+                            "required": ["data", "horario", "raw", "evidencia"],
                             "additionalProperties": False,
                         },
                         "impugnacaoAte": {
                             "type": "object",
-                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
-                            "required": ["data", "horario"],
+                            "properties": {
+                                "data": {"type": "string"},
+                                "horario": {"type": "string"},
+                                "raw": {"type": "string"},
+                                "evidencia": {"$ref": "#/$defs/Evidence"},
+                            },
+                            "required": ["data", "horario", "raw", "evidencia"],
                             "additionalProperties": False,
                         },
-                        "contatoEsclarecimentoImpugnacao": {"type": "string"},
+                        "contatoEsclarecimentoImpugnacao": {"$ref": "#/$defs/Field"},
                     },
                     "required": [
                         "enviarPropostaAte", "esclarecimentosAte", "impugnacaoAte",
@@ -351,75 +420,66 @@ Use false para booleanos quando não aplicável ou não informado.""" + EVIDENCE
         },
         "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS os PRAZOS do edital.
 
-Para cada prazo, preencha data e horário separadamente:
-- enviarPropostaAte: data e horário limite para envio da proposta (ex.: "10/02/2026" e "9H00" ou "9h00")
-- esclarecimentosAte: data e horário limite para pedidos de esclarecimento
-- impugnacaoAte: data e horário limite para impugnação
-- contatoEsclarecimentoImpugnacao: canal ou sistema para envio (ex.: LICITAR DIGITAL - sistema do certame)
+Para cada prazo (enviarPropostaAte, esclarecimentosAte, impugnacaoAte): preencha data, horario e SEMPRE raw com o texto original do prazo (ex.: "até às 10h do dia 10/02/2026"). Se não houver data/horário, deixe vazios mas preencha raw se houver qualquer menção. Inclua evidencia (trecho, ref, page).
 
-Use strings vazias para data/horário quando não encontrado. Mantenha o formato de data como no edital (DD/MM/AAAA) e horário como informado.""" + EVIDENCE_PROMPT_SUFFIX,
+contatoEsclarecimentoImpugnacao: Field com valor (canal/sistema) e evidencia.
+
+Use strings vazias quando não encontrado. Mantenha formato DD/MM/AAAA e horário como no edital.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "documentos",
-        "query": "documentação habilitação qualificação técnica fiscal jurídica atestado declaração proposta exigido",
+        "query": "documentação habilitação qualificação técnica fiscal jurídica atestado declaração proposta exigido assinatura proposta etapa",
         "schema": {
+            "$defs": SCHEMA_DEFS,
             "type": "object",
             "properties": {
-                "documentos": {
+                "requisitos": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "categoria": {"type": "string"},
-                            "itens": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "referencia": {"type": "string"},
-                                        "local": {"type": "string"},
-                                        "documento": {"type": "string"},
-                                        "solicitado": {"type": "boolean"},
-                                        "status": {"type": "string"},
-                                        "observacao": {"type": "string"},
-                                    },
-                                    "required": ["referencia", "local", "documento", "solicitado", "status", "observacao"],
-                                    "additionalProperties": False,
-                                },
-                            },
+                            "referencia": {"type": "string"},
+                            "local": {"type": "string"},
+                            "descricao": {"type": "string"},
+                            "obrigatorio": {"type": "boolean"},
+                            "etapa": {"type": "string"},
+                            "condicao": {"type": "string"},
+                            "evidencia": {"$ref": "#/$defs/Evidence"},
                         },
-                        "required": ["categoria", "itens"],
+                        "required": ["categoria", "referencia", "local", "descricao", "obrigatorio", "etapa", "condicao", "evidencia"],
                         "additionalProperties": False,
                     },
                 },
             },
-            "required": ["documentos"],
+            "required": ["requisitos"],
             "additionalProperties": False,
         },
-        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS a lista de DOCUMENTOS E QUALIFICAÇÃO exigidos pelo edital.
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS a lista de DOCUMENTOS/REQUISITOS exigidos pelo edital como uma lista normalizada (requisitos[]).
 
-Agrupe por categoria. Use exatamente estas categorias quando houver itens: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros".
+Para CADA item exigido no edital, inclua um objeto em requisitos com:
+- categoria: ex. "Qualificação Técnica", "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros"
+- referencia: número/item do edital (ex.: 7.3.5, 6.2.1.1.1)
+- local: TR ou ED quando indicado
+- descricao: texto completo do documento/requisito exigido (não resuma)
+- obrigatorio: true se exigido
+- etapa: uma de "proposta", "habilitacao", "assinatura", "execucao", "outros" conforme o edital (ex.: "exigidos apenas na assinatura" → assinatura)
+- condicao: texto quando houver (ex.: "Exigidos apenas no momento da assinatura do contrato")
+- evidencia: trecho literal (max 300 chars), ref (Item X, Cláusula Y), page
 
-Para CADA item exigido no edital, inclua um elemento em itens com:
-- referencia: número ou item do edital (ex.: 6.2.1.1.1, 8.2 - a.1)
-- local: TR ou ED quando o edital indicar (termo de referência ou edital)
-- documento: texto completo do documento exigido (não resuma)
-- solicitado: true se o edital exige o documento
-- status: string vazia
-- observacao: quando houver
-
-Extraia TODOS os itens listados (atestados técnicos, especificação técnica, documentação, etc.), um por um. Não agrupe em um único resumo. Retorne array vazio se não houver seção de documentos.""" + EVIDENCE_PROMPT_SUFFIX,
+Extraia TODOS os itens listados. Retorne array vazio se não houver seção de documentos.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "visita_proposta",
         "query": "visita técnica obrigatória validade proposta prazo dias",
         "schema": {
+            "$defs": SCHEMA_DEFS,
             "type": "object",
             "properties": {
-                "visitaTecnica": {"type": "boolean"},
+                "visitaTecnica": {"$ref": "#/$defs/BoolField"},
                 "proposta": {
                     "type": "object",
-                    "properties": {"validadeProposta": {"type": "string"}},
+                    "properties": {"validadeProposta": {"$ref": "#/$defs/Field"}},
                     "required": ["validadeProposta"],
                     "additionalProperties": False,
                 },
@@ -429,12 +489,12 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
         },
         "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS VISITA TÉCNICA e PROPOSTA.
 
-- visitaTecnica: true SOMENTE se o edital exigir visita técnica OBRIGATÓRIA; false se não obrigatória ou não mencionada.
-- proposta.validadeProposta: prazo de validade da proposta (ex.: 60 dias, até a sessão, ou texto do edital). Use string vazia se não informado.""" + EVIDENCE_PROMPT_SUFFIX,
+- visitaTecnica: BoolField. valor=true SOMENTE se o edital exigir visita técnica OBRIGATÓRIA; valor=false se não obrigatória ou não mencionada (informado=false).
+- proposta.validadeProposta: Field com valor (ex.: 60 dias, até a sessão) e evidencia.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
-        "key": "sessao_outros",
-        "query": "lances aberto fechado proposta ajustada intervalo diferença pagamento mecanismo",
+        "key": "sessao_disputa",
+        "query": "sessão pública lances aberto fechado diferença entre lances proposta ajustada critério julgamento menor preço maior desconto taxa disputa tempo randômico fase lances prazo",
         "schema": {
             "type": "object",
             "properties": {
@@ -444,10 +504,37 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
                         "diferencaEntreLances": {"type": "string"},
                         "horasPropostaAjustada": {"type": "string"},
                         "abertoFechado": {"type": "string"},
+                        "criterioJulgamento": {"type": "string"},
+                        "tempoDisputa": {"type": "string"},
+                        "tempoRandomico": {"type": "string"},
+                        "faseLances": {"type": "string"},
+                        "prazoPosLance": {"type": "string"},
                     },
-                    "required": ["diferencaEntreLances", "horasPropostaAjustada", "abertoFechado"],
                     "additionalProperties": False,
                 },
+            },
+            "required": ["sessao"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS dados da SESSÃO e DISPUTA do edital.
+
+- sessao.diferencaEntreLances: valor ou percentual mínimo entre lances
+- sessao.horasPropostaAjustada: prazo para proposta ajustada
+- sessao.abertoFechado: se sessão é aberta ou fechada
+- sessao.criterioJulgamento: critério de julgamento (ex.: menor preço, maior desconto, maior taxa)
+- sessao.tempoDisputa: tempo de disputa (ex.: 15 minutos)
+- sessao.tempoRandomico: tempo randômico quando houver (ex.: 2 min aleatórios)
+- sessao.faseLances: descrição da fase de lances (ex.: aberta 15 min + 2 min aleatórios)
+- sessao.prazoPosLance: prazo pós-lance quando aplicável (ex.: 48h)
+
+Use string vazia para qualquer campo não encontrado.""" + EVIDENCE_PROMPT_SUFFIX,
+    },
+    {
+        "key": "pagamento_contrato",
+        "query": "pagamento faturamento medição mecanismo contrato forma de pagamento",
+        "schema": {
+            "type": "object",
+            "properties": {
                 "outrosEdital": {
                     "type": "object",
                     "properties": {"mecanismoPagamento": {"type": "string"}},
@@ -455,15 +542,12 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
                     "additionalProperties": False,
                 },
             },
-            "required": ["sessao", "outrosEdital"],
+            "required": ["outrosEdital"],
             "additionalProperties": False,
         },
-        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS dados da SESSÃO e OUTROS do edital.
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS dados de PAGAMENTO/CONTRATO do edital.
 
-- sessao.diferencaEntreLances: valor ou percentual mínimo entre lances (quando aplicável)
-- sessao.horasPropostaAjustada: prazo para proposta ajustada (quando aplicável)
-- sessao.abertoFechado: se sessão é aberta ou fechada (quando aplicável)
-- outrosEdital.mecanismoPagamento: forma de pagamento (ex.: faturamento, medição). Use string vazia quando não encontrado.""" + EVIDENCE_PROMPT_SUFFIX,
+- outrosEdital.mecanismoPagamento: forma de pagamento (ex.: faturamento, medição, conforme contrato). Use string vazia quando não encontrado.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "analise",
@@ -487,12 +571,122 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
 ]
 
 
+def _extract_valor(obj, default=None):
+    """Extract .valor from a Field/BoolField or return obj if not a dict with 'valor'."""
+    if isinstance(obj, dict) and "valor" in obj:
+        return obj["valor"]
+    return obj if obj is not None else default
+
+
+def _extract_evidence(obj):
+    """Extract .evidencia from a Field/BoolField or return None."""
+    if isinstance(obj, dict) and "evidencia" in obj and isinstance(obj["evidencia"], dict):
+        return obj["evidencia"]
+    return None
+
+
+def _requisitos_to_documentos(requisitos: list) -> list:
+    """Build documentos (categoria/itens) from requisitos[] for front compat."""
+    if not requisitos:
+        return []
+    by_cat = {}
+    for r in requisitos:
+        if not isinstance(r, dict):
+            continue
+        cat = (r.get("categoria") or "Outros").strip() or "Outros"
+        if cat not in by_cat:
+            by_cat[cat] = []
+        by_cat[cat].append({
+            "referencia": r.get("referencia") or "",
+            "local": r.get("local") or "",
+            "documento": r.get("descricao") or "",
+            "solicitado": bool(r.get("obrigatorio", True)),
+            "status": "",
+            "observacao": (r.get("condicao") or "") + (" [etapa: " + (r.get("etapa") or "") + "]" if r.get("etapa") else ""),
+        })
+    return [{"categoria": c, "itens": items} for c, items in by_cat.items()]
+
+
+def _flatten_block_result(block_key: str, block_data: dict) -> tuple[dict, dict]:
+    """Convert block LLM output (with Field/BoolField/Evidence) to flat merge shape and evidence. Returns (flat_dict, evidence_dict)."""
+    flat = {}
+    evidence = {}
+
+    if block_key == "edital" and "edital" in block_data:
+        ed = block_data["edital"]
+        flat["edital"] = {}
+        evidence["edital"] = {}
+        for k, v in (ed or {}).items():
+            flat["edital"][k] = _extract_valor(v, "")
+            ev = _extract_evidence(v)
+            if ev:
+                evidence["edital"][k] = ev
+        return flat, evidence
+
+    if block_key == "modalidade_participacao":
+        flat["modalidadeLicitacao"] = _extract_valor(block_data.get("modalidadeLicitacao"), "")
+        part = block_data.get("participacao") or {}
+        flat["participacao"] = {
+            "permiteConsorcio": _extract_valor(part.get("permiteConsorcio"), False),
+            "beneficiosMPE": _extract_valor(part.get("beneficiosMPE"), False),
+            "itemEdital": _extract_valor(part.get("itemEdital"), ""),
+        }
+        if _extract_evidence(block_data.get("modalidadeLicitacao")):
+            evidence.setdefault("modalidade_participacao", {})["modalidadeLicitacao"] = _extract_evidence(block_data["modalidadeLicitacao"])
+        for f in ("permiteConsorcio", "beneficiosMPE", "itemEdital"):
+            ev = _extract_evidence((part or {}).get(f))
+            if ev:
+                evidence.setdefault("modalidade_participacao", {}).setdefault("participacao", {})[f] = ev
+        return flat, evidence
+
+    if block_key == "prazos" and "prazos" in block_data:
+        prazos = block_data["prazos"]
+        flat["prazos"] = {}
+        evidence.setdefault("prazos", {})
+        for key in ("enviarPropostaAte", "esclarecimentosAte", "impugnacaoAte"):
+            obj = (prazos or {}).get(key)
+            if isinstance(obj, dict):
+                flat["prazos"][key] = {
+                    "data": obj.get("data") or "",
+                    "horario": obj.get("horario") or "",
+                    "raw": obj.get("raw") or "",
+                }
+                if obj.get("evidencia"):
+                    evidence["prazos"][key] = obj["evidencia"]
+        contato = (prazos or {}).get("contatoEsclarecimentoImpugnacao")
+        flat["prazos"]["contatoEsclarecimentoImpugnacao"] = _extract_valor(contato, "")
+        if _extract_evidence(contato):
+            evidence["prazos"]["contatoEsclarecimentoImpugnacao"] = _extract_evidence(contato)
+        return flat, evidence
+
+    if block_key == "documentos":
+        if "requisitos" in block_data:
+            reqs = block_data.get("requisitos") or []
+            flat["requisitos"] = reqs
+            flat["documentos"] = _requisitos_to_documentos(reqs)
+        elif "documentos" in block_data:
+            # Legacy shape (categoria/itens)
+            flat["documentos"] = block_data["documentos"]
+            flat["requisitos"] = []
+        return flat, evidence
+
+    if block_key == "visita_proposta":
+        flat["visitaTecnica"] = _extract_valor(block_data.get("visitaTecnica"), False)
+        prop = block_data.get("proposta") or {}
+        val = prop.get("validadeProposta")
+        flat["proposta"] = {"validadeProposta": _extract_valor(val, "") if isinstance(val, dict) else (val or "")}
+        return flat, evidence
+
+    # sessao_disputa, pagamento_contrato, analise: merge as-is (already flat)
+    return block_data, evidence
+
+
 def _deep_merge_checklist(base: dict, block_result: dict) -> None:
     """Merge block_result into base in-place. For lists (e.g. documentos), replace; for dicts, deep merge."""
     for key, value in block_result.items():
         if key not in base:
             base[key] = value
-        elif isinstance(value, dict) and isinstance(base.get(key), dict):
+        elif isinstance(value, dict) and isinstance(base.get(key), dict) and key != "evidence":
             _deep_merge_checklist(base[key], value)
         elif isinstance(value, list):
             base[key] = value
@@ -543,15 +737,16 @@ def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: st
         name = block["key"]
         try:
             block_data, raw = _generate_one_block(openai_client, block, context, file_name)
-            raw_by_block[name] = block_data
-            if name == "modalidade_participacao":
-                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
-                merged["participacao"] = block_data.get("participacao") or {}
-            else:
-                _deep_merge_checklist(merged, block_data)
+            raw_by_block[name] = {"parsed": block_data, "raw": raw}
+            flat, ev = _flatten_block_result(name, block_data)
+            if ev:
+                merged.setdefault("evidence", {})
+                _deep_merge_checklist(merged["evidence"], ev)
+            _deep_merge_checklist(merged, flat)
         except Exception as e:
             logger.warning("Block %s failed: %s", name, e)
-            raw_by_block[name] = {"_error": str(e)}
+            raw_by_block[name] = {"parsed": {"_error": str(e)}, "raw": ""}
+    merged.setdefault("schemaVersion", 2)
     _fill_checklist_defaults(merged)
     openai_debug = {
         "mode": "blocks",
@@ -580,7 +775,10 @@ def _fill_checklist_defaults(merged: dict) -> None:
             elif key == "proposta":
                 merged["proposta"] = {"validadeProposta": ""}
             elif key == "sessao":
-                merged["sessao"] = {"diferencaEntreLances": "", "horasPropostaAjustada": "", "abertoFechado": ""}
+                merged["sessao"] = {
+                    "diferencaEntreLances": "", "horasPropostaAjustada": "", "abertoFechado": "",
+                    "criterioJulgamento": "", "tempoDisputa": "", "tempoRandomico": "", "faseLances": "", "prazoPosLance": "",
+                }
             elif key == "outrosEdital":
                 merged["outrosEdital"] = {"mecanismoPagamento": ""}
             elif key == "pontuacao":
@@ -591,6 +789,7 @@ def _fill_checklist_defaults(merged: dict) -> None:
                 merged["visitaTecnica"] = False
             else:
                 merged[key] = ""
+    merged.setdefault("requisitos", [])
 
 
 def generate_checklist_blocks_retrieval(
@@ -613,15 +812,15 @@ def generate_checklist_blocks_retrieval(
         query = block.get("query", name.replace("_", " "))
         try:
             context, retrieved_chunks = retrieve_for_block(
-                openai_client, query, chunks_with_embeddings, top_k=TOP_K_RETRIEVAL
+                openai_client, query, chunks_with_embeddings, block_key=name, top_k=TOP_K_RETRIEVAL
             )
             block_data, raw = _generate_one_block(openai_client, block, context, file_name)
-            raw_by_block[name] = block_data
-            if name == "modalidade_participacao":
-                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
-                merged["participacao"] = block_data.get("participacao") or {}
-            else:
-                _deep_merge_checklist(merged, block_data)
+            raw_by_block[name] = {"parsed": block_data, "raw": raw}
+            flat, ev = _flatten_block_result(name, block_data)
+            if ev:
+                merged.setdefault("evidence", {})
+                _deep_merge_checklist(merged["evidence"], ev)
+            _deep_merge_checklist(merged, flat)
             llm_input = (
                 f"Trechos do documento ({file_name or 'document'}):\n\n{context}\n\n"
                 "Extraia apenas a parte do checklist correspondente a este bloco com base EXCLUSIVAMENTE nos trechos acima. Retorne em JSON."
@@ -636,9 +835,10 @@ def generate_checklist_blocks_retrieval(
             })
         except Exception as e:
             logger.warning("Block %s failed: %s", name, e)
-            raw_by_block[name] = {"_error": str(e)}
+            raw_by_block[name] = {"parsed": {"_error": str(e)}, "raw": ""}
             blocks_debug.append({"block": name, "query": query, "error": str(e)})
 
+    merged.setdefault("schemaVersion", 2)
     _fill_checklist_defaults(merged)
     merged = normalize_checklist_result(merged)
     openai_debug = {
@@ -668,12 +868,15 @@ def _normalize_date(s: str) -> str:
 
 
 def _normalize_currency(s: str) -> str:
-    """Ensure currency is prefixed with R$ when it looks like a value."""
+    """Ensure currency is prefixed with R$ only when it clearly looks like a monetary value (avoid e.g. '12 (doze) meses')."""
     if not s or not isinstance(s, str):
         return s or ""
     s = s.strip()
-    if s and re.search(r"[\d.,]+", s) and not s.upper().startswith("R$"):
-        return "R$ " + s
+    # Only match explicit currency patterns: R$ already, or number with decimal comma (1.234,56 or 10,50)
+    if s.upper().startswith("R$"):
+        return s
+    if re.search(r"\b\d{1,3}(\.\d{3})*,\d{2}\b", s) or re.search(r"\b\d+,\d{2}\b", s):
+        return "R$ " + s if not s.upper().startswith("R$") else s
     return s
 
 
@@ -843,7 +1046,7 @@ def _detect_section_hint(text: str) -> str:
 def _split_into_size_chunks(
     text: str, page_number: int | None, section_hint: str, chunk_id_prefix: str
 ) -> list[dict]:
-    """Split text into chunks of CHUNK_MIN_CHARS–CHUNK_MAX_CHARS; preserve section_hint on first chunk."""
+    """Split text into chunks of CHUNK_MIN_CHARS–CHUNK_MAX_CHARS with overlap; preserve section_hint on first chunk."""
     text = (text or "").strip()
     if not text:
         return []
@@ -870,7 +1073,12 @@ def _split_into_size_chunks(
                 "chunk_id": f"{chunk_id_prefix}_{idx}",
             })
             idx += 1
+        # Overlap: next start goes back so we don't lose context at boundary (e.g. "apenas na assinatura")
         start = end
+        if end < len(text) and CHUNK_OVERLAP_CHARS > 0:
+            overlap_start = max(start - CHUNK_OVERLAP_CHARS, 0)
+            if overlap_start < start:
+                start = overlap_start
     return chunks_out
 
 
@@ -1173,28 +1381,76 @@ def embed_query(openai_client: OpenAI, query: str) -> list[float]:
     return []
 
 
+# MMR: take top N by similarity then select K by MMR to reduce redundancy. Section hint boost label.
+TOP_N_FOR_MMR = 40
+MMR_LAMBDA = 0.7  # balance relevance vs diversity (higher = more relevance)
+
+
 def retrieve_for_block(
     openai_client: OpenAI,
     query: str,
     chunks_with_embeddings: list[tuple[dict, list[float]]],
+    block_key: str | None = None,
     top_k: int = TOP_K_RETRIEVAL,
 ) -> tuple[str, list[dict]]:
-    """Run vector search for block query; return (context string, list of retrieved chunk dicts for debug)."""
+    """Run vector search with MMR and optional section_hint boost; return (context string, retrieved chunk dicts)."""
     if not chunks_with_embeddings:
         return "", []
-    query_emb = embed_query(openai_client, query)
+    # Optional query expansion for section hint (improves retrieval for document blocks)
+    section_hint_map = {
+        "edital": "IDENTIFICAÇÃO",
+        "modalidade_participacao": "MODALIDADE",
+        "prazos": "PRAZOS DO PRAZO",
+        "documentos": "DOCUMENTAÇÃO HABILITAÇÃO QUALIFICAÇÃO",
+        "visita_proposta": "VISITA PROPOSTA",
+        "sessao_disputa": "SESSÃO MODO DE DISPUTA CRITÉRIO JULGAMENTO",
+        "pagamento_contrato": "PAGAMENTO CONTRATO",
+        "analise": "ANÁLISE",
+    }
+    search_query = (query + " " + section_hint_map[block_key]) if (block_key and block_key in section_hint_map) else query
+    query_emb = embed_query(openai_client, search_query)
     if not query_emb:
         return "", []
-    scored = [
-        (_cosine_similarity(emb, query_emb), ch)
-        for ch, emb in chunks_with_embeddings
-        if emb
-    ]
+
+    scored = []
+    for ch, emb in chunks_with_embeddings:
+        if not emb:
+            continue
+        sim = _cosine_similarity(emb, query_emb)
+        # Boost score if chunk's section_hint matches block (e.g. DOCUMENTAÇÃO for documentos block)
+        hint = (ch.get("section_hint") or "").upper()
+        if block_key and hint:
+            if block_key == "documentos" and any(x in hint for x in ("DOCUMENTAÇÃO", "QUALIFICAÇÃO", "HABILITAÇÃO")):
+                sim = sim * 1.15
+            elif block_key == "prazos" and "PRAZO" in hint:
+                sim = sim * 1.15
+            elif block_key == "sessao_disputa" and "SESSÃO" in hint:
+                sim = sim * 1.15
+        scored.append((sim, ch, emb))
     scored.sort(key=lambda x: -x[0])
-    top = scored[:top_k]
-    retrieved = [ch for _, ch in top]
+    candidate_pool = [(s, ch, emb) for s, ch, emb in scored[:TOP_N_FOR_MMR]]
+
+    # MMR: select top_k maximizing lambda*sim(q,d) - (1-lambda)*max_sim(d, selected)
+    selected = []
+    remaining = list(candidate_pool)
+    while len(selected) < top_k and remaining:
+        best_score = -2.0
+        best_idx = 0
+        for i, (sim_q, ch, emb) in enumerate(remaining):
+            max_sim_to_selected = 0.0
+            for _s, _ch, _emb in selected:
+                max_sim_to_selected = max(max_sim_to_selected, _cosine_similarity(emb, _emb))
+            mmr = MMR_LAMBDA * sim_q - (1.0 - MMR_LAMBDA) * max_sim_to_selected
+            if mmr > best_score:
+                best_score = mmr
+                best_idx = i
+        sel = remaining.pop(best_idx)
+        selected.append(sel)
+    retrieved = [ch for _, ch, _ in selected]
+    if not retrieved and candidate_pool:
+        retrieved = [ch for _, ch, _ in candidate_pool[:top_k]]
     context = CHUNK_SEP.join(c["text"] for c in retrieved)
-    logger.debug("Retrieval query=%r top_k=%d retrieved=%d context_len=%d", query[:50], top_k, len(retrieved), len(context))
+    logger.debug("Retrieval query=%r block=%s top_k=%d retrieved=%d context_len=%d", query[:50], block_key, top_k, len(retrieved), len(context))
     return context, retrieved
 
 
@@ -1316,12 +1572,12 @@ def generate_checklist_from_pdf_file(
         name = block["key"]
         try:
             block_data, raw, resp = _generate_one_block_from_pdf_file(openai_client, file_id, block, file_name)
-            raw_by_block[name] = block_data
-            if name == "modalidade_participacao":
-                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
-                merged["participacao"] = block_data.get("participacao") or {}
-            else:
-                _deep_merge_checklist(merged, block_data)
+            raw_by_block[name] = {"parsed": block_data, "raw": raw}
+            flat, ev = _flatten_block_result(name, block_data)
+            if ev:
+                merged.setdefault("evidence", {})
+                _deep_merge_checklist(merged["evidence"], ev)
+            _deep_merge_checklist(merged, flat)
             usage = getattr(resp, "usage", None)
             if usage:
                 total_usage["prompt_tokens"] += getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
@@ -1335,7 +1591,8 @@ def generate_checklist_from_pdf_file(
                     name, e,
                 )
             logger.warning("Block %s failed (PDF file): %s", name, e)
-            raw_by_block[name] = {"_error": str(e)}
+            raw_by_block[name] = {"parsed": {"_error": str(e)}, "raw": ""}
+    merged.setdefault("schemaVersion", 2)
     _fill_checklist_defaults(merged)
     merged = normalize_checklist_result(merged)
     openai_debug = {
