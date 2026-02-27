@@ -1616,8 +1616,10 @@ def insert_checklist(
     file_name: str,
     data: dict,
     document_id: str,
+    *,
+    processed_with_pdf_mode: bool = False,
 ):
-    logger.info("Inserting checklist: documentId=%s userId=%s fileName=%s", document_id, user_id, file_name or "document")
+    logger.info("Inserting checklist: documentId=%s userId=%s fileName=%s processedWithPdfMode=%s", document_id, user_id, file_name or "document", processed_with_pdf_mode)
     ed = data.get("edital") or {}
     orgao = ed.get("orgao") or None
     objeto = ed.get("objeto") or None
@@ -1627,8 +1629,8 @@ def insert_checklist(
         pontuacao = int(pontuacao) if pontuacao else None
     checklist_id = str(uuid.uuid4())
     query = """
-            INSERT INTO "Checklist" (id, "userId", file_name, data, pontuacao, orgao, objeto, valor_total, "documentId")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO "Checklist" (id, "userId", file_name, data, pontuacao, orgao, objeto, valor_total, "documentId", "processedWithPdfMode")
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
     params = (
         checklist_id,
@@ -1640,6 +1642,7 @@ def insert_checklist(
         objeto,
         valor_total,
         document_id,
+        processed_with_pdf_mode,
     )
     _log_query(query, params)
     with conn.cursor() as cur:
@@ -1689,7 +1692,7 @@ def process_job(payload: dict):
             upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
             conn = get_conn()
             try:
-                insert_checklist(conn, user_id, file_name, checklist_data, document_id)
+                insert_checklist(conn, user_id, file_name, checklist_data, document_id, processed_with_pdf_mode=True)
             finally:
                 conn.close()
         else:
@@ -1728,7 +1731,7 @@ def process_job(payload: dict):
 
                 openai_debug = {"checklist": checklist_openai_debug}
                 upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
-                insert_checklist(conn, user_id, file_name, checklist_data, document_id)
+                insert_checklist(conn, user_id, file_name, checklist_data, document_id, processed_with_pdf_mode=False)
             finally:
                 conn.close()
 

@@ -57,18 +57,19 @@ model Verification {
 }
 
 model Checklist {
-  id          String    @id @default(uuid())
-  userId      String
-  file_name   String
-  data        Json
-  pontuacao   Int?
-  orgao       String?
-  objeto      String?
-  valor_total String?
-  documentId  String?   @unique
-  created_at  DateTime  @default(now())
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  document    Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  id                    String    @id @default(uuid())
+  userId                String
+  file_name             String
+  data                  Json
+  pontuacao             Int?
+  orgao                 String?
+  objeto                String?
+  valor_total           String?
+  documentId            String?   @unique
+  processedWithPdfMode  Boolean?  // true when checklist was generated using PDF-as-file mode (Responses API)
+  created_at            DateTime  @default(now())
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document              Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([documentId])

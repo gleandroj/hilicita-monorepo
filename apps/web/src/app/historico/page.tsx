@@ -27,6 +27,7 @@ interface SavedChecklist {
   orgao: string | null;
   objeto: string | null;
   valor_total: string | null;
+  processedWithPdfMode?: boolean | null;
   created_at: string;
 }
 
@@ -204,18 +205,26 @@ function HistoryContent() {
                           {format(new Date(checklist.created_at), "dd MMM yyyy, HH:mm", { locale: ptBR })}
                         </span>
                       </div>
-                      {checklist.pontuacao !== null && (
-                        <span
-                          className={cn(
-                            "inline-block text-xs font-semibold px-2 py-0.5 rounded-full",
-                            checklist.pontuacao >= 70 && "bg-success/10 text-success",
-                            checklist.pontuacao >= 40 && checklist.pontuacao < 70 && "bg-warning/10 text-warning",
-                            checklist.pontuacao < 40 && "bg-destructive/10 text-destructive"
-                          )}
-                        >
-                          Pontuação: {checklist.pontuacao}
-                        </span>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2 mt-1">
+                        {checklist.pontuacao !== null && (
+                          <span
+                            className={cn(
+                              "inline-block text-xs font-semibold px-2 py-0.5 rounded-full",
+                              checklist.pontuacao >= 70 && "bg-success/10 text-success",
+                              checklist.pontuacao >= 40 && checklist.pontuacao < 70 && "bg-warning/10 text-warning",
+                              checklist.pontuacao < 40 && "bg-destructive/10 text-destructive"
+                            )}
+                          >
+                            Pontuação: {checklist.pontuacao}
+                          </span>
+                        )}
+                        {checklist.processedWithPdfMode === true && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                            <FileText className="h-3 w-3" />
+                            Modo PDF
+                          </span>
+                        )}
+                      </div>
                     </Link>
                     <div className="flex items-center gap-1 shrink-0">
                       <Button size="sm" variant="ghost" asChild>

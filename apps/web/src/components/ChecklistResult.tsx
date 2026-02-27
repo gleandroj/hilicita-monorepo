@@ -88,6 +88,8 @@ export interface ChecklistData {
 interface ChecklistResultProps {
   data: ChecklistData;
   fileName: string;
+  /** When true, checklist was generated using PDF-as-file mode (Responses API). */
+  processedWithPdfMode?: boolean;
 }
 
 function hasAnySessaoField(s: ChecklistData["sessao"]): boolean {
@@ -136,7 +138,7 @@ function sanitizeMecanismoPagamento(value: unknown, maxLen = 600): string {
   return s;
 }
 
-const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
+const ChecklistResult = ({ data, fileName, processedWithPdfMode }: ChecklistResultProps) => {
   const scoreColor = (data.pontuacao ?? 0) >= 70 ? "text-success" : (data.pontuacao ?? 0) >= 40 ? "text-warning" : "text-destructive";
   const ed = data.edital;
   const valorTotal = ed.totalReais ?? ed.valorTotal ?? "";
@@ -154,9 +156,17 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
       {/* Header with score */}
       <div className="flex items-start justify-between rounded-xl bg-card p-6 shadow-card border border-border">
         <div className="space-y-1">
-          <h2 className="font-display text-2xl font-bold text-foreground">
-            Checklist Extraído
-          </h2>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="font-display text-2xl font-bold text-foreground">
+              Checklist Extraído
+            </h2>
+            {processedWithPdfMode && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full bg-primary/10 text-primary border border-primary/20">
+                <FileText className="h-3.5 w-3.5" />
+                Processado com modo PDF
+              </span>
+            )}
+          </div>
           <p className="text-sm text-muted-foreground">{fileName}</p>
         </div>
         {data.pontuacao !== undefined && (

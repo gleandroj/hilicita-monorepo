@@ -19,6 +19,7 @@ interface SavedChecklist {
   orgao: string | null;
   objeto: string | null;
   valor_total: string | null;
+  processedWithPdfMode?: boolean | null;
   created_at: string;
 }
 
@@ -100,7 +101,11 @@ function ChecklistDetailContent() {
             Voltar ao histórico
           </Link>
         </Button>
-        <ChecklistResult data={checklist.data} fileName={checklist.file_name} />
+        <ChecklistResult
+          data={checklist.data}
+          fileName={checklist.file_name}
+          processedWithPdfMode={checklist.processedWithPdfMode ?? undefined}
+        />
       </main>
     </div>
   );

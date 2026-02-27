@@ -99,6 +99,10 @@ export class DocumentsService {
     });
     if (!checklist)
       throw new NotFoundException('Checklist not found for this document');
-    return { checklist: checklist.data as object, checklistId: checklist.id };
+    return {
+      checklist: checklist.data as object,
+      checklistId: checklist.id,
+      processedWithPdfMode: checklist.processedWithPdfMode ?? undefined,
+    };
   }
 }
