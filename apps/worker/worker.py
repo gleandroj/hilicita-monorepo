@@ -39,7 +39,8 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "documents")
-CHAT_MODEL = "gpt-4o-mini"
+# Model for checklist extraction. gpt-4o is more accurate for long editais and PDF-as-file (vision); override with OPENAI_CHAT_MODEL for cost/speed.
+CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o")
 CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
 TOP_K = 10
 
