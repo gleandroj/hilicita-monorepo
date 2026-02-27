@@ -9,9 +9,12 @@ export const auth = betterAuth({
     provider: 'postgresql',
   }),
   basePath: '/api/auth',
+  baseURL: process.env.BETTER_AUTH_URL, // In prod set to https://api.hilicita.com (no trailing slash)
   secret:
     process.env.BETTER_AUTH_SECRET ?? 'development-secret-change-in-production',
-  trustedOrigins: process.env.BETTER_AUTH_TRUSTED_ORIGINS?.split(',') ?? [],
+  trustedOrigins:
+    process.env.BETTER_AUTH_TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ??
+    [],
   emailAndPassword: {
     enabled: true,
   },

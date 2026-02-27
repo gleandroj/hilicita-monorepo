@@ -59,6 +59,8 @@ services:
           property: connectionString
       - key: BETTER_AUTH_SECRET
         generateValue: true
+      - key: BETTER_AUTH_URL
+        sync: false
       - key: BETTER_AUTH_TRUSTED_ORIGINS
         sync: false
       - key: CORS_ORIGIN
