@@ -39,7 +39,7 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "documents")
-# Model for checklist extraction. gpt-4o is more accurate for long editais and PDF-as-file (vision); override with OPENAI_CHAT_MODEL for cost/speed.
+# Model for checklist extraction. gpt-4o is more accurate for long editais and PDF-as-file (vision); override with OPENAI_CHAT_MODEL for cost/speed (e.g. gpt-4o-mini if hitting TPM limits).
 CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o")
 CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
 TOP_K = 10
@@ -1308,7 +1308,11 @@ def generate_checklist_from_pdf_file(
     raw_by_block = {}
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     last_model = CHAT_MODEL
-    for block in CHECKLIST_BLOCKS:
+    # Delay between blocks to stay under TPM/RPM when using gpt-4o or large PDFs.
+    pdf_block_delay_sec = float(os.environ.get("PDF_BLOCK_DELAY_SEC", "2.0"))
+    for i, block in enumerate(CHECKLIST_BLOCKS):
+        if i > 0 and pdf_block_delay_sec > 0:
+            time.sleep(pdf_block_delay_sec)
         name = block["key"]
         try:
             block_data, raw, resp = _generate_one_block_from_pdf_file(openai_client, file_id, block, file_name)
