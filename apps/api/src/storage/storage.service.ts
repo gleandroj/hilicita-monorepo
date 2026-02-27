@@ -17,7 +17,11 @@ export class StorageService {
   private readonly client: S3Client | null = null;
 
   constructor() {
-    const endpoint = process.env.MINIO_ENDPOINT;
+    const endpoint =
+      process.env.MINIO_ENDPOINT ||
+      (process.env.MINIO_HOST && process.env.MINIO_PORT
+        ? `http://${process.env.MINIO_HOST}:${process.env.MINIO_PORT}`
+        : undefined);
     const accessKey = process.env.MINIO_ACCESS_KEY;
     const secretKey = process.env.MINIO_SECRET_KEY;
     if (endpoint && accessKey && secretKey) {

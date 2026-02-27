@@ -7,7 +7,7 @@ O worker consome a fila Redis `document:ingest`, baixa o arquivo (URL pré-assin
 ## Visão geral
 
 ```
-Redis (document:ingest) → process_job → Download → [PDF como arquivo | Parse texto] → Checklist (LLM por blocos ou legacy) → Normalização → Postgres (Document + Checklist)
+Redis (document:ingest) → process_job → Download → [PDF como arquivo | Parse texto] → Checklist (LLM por blocos) → Normalização → Postgres (Document + Checklist)
 ```
 
 ---
@@ -47,8 +47,7 @@ flowchart TB
     end
 
     subgraph modo_texto["Modo texto parseado"]
-        J --> Q{USE_CHECKLIST_BLOCKS?}
-        Q -->|Sim| R[parse_file_to_normalized_chunks]
+        J --> R[parse_file_to_normalized_chunks]
         R --> R0[Chunks 800–1200 chars, overlap 150]
         R0 --> R1[embed_chunks]
         R1 --> R2[Por bloco: retrieve_for_block]
@@ -59,15 +58,6 @@ flowchart TB
         R3 --> R4[_flatten_block_result → flat + evidence]
         R4 --> R5[_deep_merge_checklist]
         R5 --> R6[schemaVersion=2, _fill_checklist_defaults, normalize_checklist_result]
-        Q -->|Não legacy| S[parse_file]
-        S --> T{USE_VECTOR_STORE?}
-        T -->|Sim| U[create_vector_store_and_upload_chunks]
-        U --> U2[update_document_vector_store]
-        U2 --> V[search_vector_store]
-        V --> W[generate_checklist 1 chamada]
-        T -->|Não| X[build_full_document_context]
-        X --> W
-        W --> Y[normalize_checklist_result]
     end
 
     subgraph persistencia["Persistência"]
@@ -137,8 +127,6 @@ flowchart TB
 
 ## 4. Modo texto parseado (`usePdfFile = false`)
 
-### 4.1 Com blocos + retrieval (`USE_CHECKLIST_BLOCKS = true`, padrão)
-
 1. **Parse**: `parse_file_to_normalized_chunks(file_path, file_name)`.
    - `partition(filename=..., languages=["por"])` (unstructured).
    - Segmentos viram chunks de **800–1200 caracteres** (`CHUNK_MIN_CHARS`, `CHUNK_MAX_CHARS`) com **overlap de 150** (`CHUNK_OVERLAP_CHARS`) para não cortar cláusulas.
@@ -161,15 +149,6 @@ flowchart TB
    - `_flatten_block_result(name, block_data)` → `(flat, evidence)`.
    - Merge de `evidence` em `merged["evidence"]` e de `flat` em `merged` com `_deep_merge_checklist`.
 4. `schemaVersion = 2`, `_fill_checklist_defaults`, `normalize_checklist_result`.
-
-### 4.2 Legacy (sem blocos, `USE_CHECKLIST_BLOCKS = false`)
-
-1. **Parse**: `parse_file` → lista de textos (chunks do partition).
-2. **Contexto**:
-   - Se `USE_VECTOR_STORE`: `create_vector_store_and_upload_chunks` → **DB**: `update_document_vector_store(document_id, vector_store_id)` → `search_vector_store(CHECKLIST_QUERY)` e juntar textos.
-   - Senão: `build_full_document_context(chunks_text)` (concatenação).
-3. **Uma chamada**: `generate_checklist(openai_client, context, file_name)` com schema completo (v1-compat).
-4. `normalize_checklist_result`.
 
 ---
 
@@ -226,8 +205,6 @@ Os blocos usam schemas com **Field** / **BoolField** / **Evidence** (schema v2):
 | `OPENAI_API_KEY`       | Chat, Responses, Embeddings, Files |
 | `OPENAI_CHAT_MODEL`    | Modelo (default: gpt-4o) |
 | `USE_PDF_AS_FILE`      | Default do modo PDF como arquivo |
-| `USE_CHECKLIST_BLOCKS` | Ativa blocos + retrieval (default: true) |
-| `USE_VECTOR_STORE`     | Legacy: vector store no fluxo sem blocos |
 | `PDF_BLOCK_DELAY_SEC`  | Atraso entre blocos no modo PDF (ex.: 2.0) |
 | `CHUNK_MIN_CHARS` / `CHUNK_MAX_CHARS` | Tamanho dos chunks (800–1200) |
 | `CHUNK_OVERLAP_CHARS`  | Overlap entre chunks (150) |
@@ -238,8 +215,7 @@ Os blocos usam schemas com **Field** / **BoolField** / **Evidence** (schema v2):
 
 ---
 
-## 10. Resumo dos três caminhos
+## 10. Resumo dos dois caminhos
 
 1. **PDF como arquivo**: Download → Upload PDF (Files API) → 8 chamadas Responses API (uma por bloco em `CHECKLIST_BLOCKS`) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.
-2. **Blocos + retrieval**: Download → Partition → Chunks normalizados (800–1200 + overlap) → Embeddings → Por bloco: retrieval (query + section_hint_map, cosine + boost, MMR top_k) → 8 chamadas Chat (uma por bloco) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.
-3. **Legacy**: Download → Partition → (opcional: vector store + update_document_vector_store + search) ou contexto completo → 1 chamada Chat (schema único) → normalize → insert_checklist → done.
+2. **Blocos + retrieval** (modo texto): Download → Partition → Chunks normalizados (800–1200 + overlap) → Embeddings → Por bloco: retrieval (query + section_hint_map, cosine + boost, MMR top_k) → 8 chamadas Chat (uma por bloco) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.
