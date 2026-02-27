@@ -49,17 +49,27 @@ USE_VECTOR_STORE = False
 # Can be overridden per job via payload "usePdfFile". Requires vision-capable model (e.g. gpt-4o, gpt-4o-mini).
 USE_PDF_AS_FILE = os.environ.get("USE_PDF_AS_FILE", "false").lower() in ("true", "1")
 
-CHECKLIST_SYSTEM_PROMPT = """Você é um especialista em licitações brasileiras. Seu trabalho é preencher um checklist estruturado com base no documento do edital, seguindo o modelo padrão de checklist de licitação.
+# When True, generate checklist in multiple LLM calls (one per block) and merge. Improves accuracy for long editais.
+USE_CHECKLIST_BLOCKS = os.environ.get("USE_CHECKLIST_BLOCKS", "true").lower() in ("true", "1")
 
-Com base no contexto fornecido (conteúdo do documento), extraia todas as informações nos campos indicados. Use string vazia quando não encontrar a informação e false para campos booleanos quando não aplicável.
+# --- Single-call (legacy) system prompt: sectioned instructions for clarity when not using blocks ---
+CHECKLIST_SYSTEM_PROMPT = """Você é um especialista em licitações brasileiras. Preencha o checklist estruturado com base no documento do edital, seguindo o modelo padrão de checklist de licitação.
 
-Para PRAZOS: preencha data e horário separadamente quando o edital informar (ex.: "Enviar proposta até 01/03/2025 14h" -> enviarPropostaAte: { "data": "01/03/2025", "horario": "14h" }).
+Regras gerais: use string vazia quando não encontrar a informação; use false para campos booleanos quando não aplicável.
 
-Para DOCUMENTOS: agrupe por categoria. Use exatamente estas categorias quando houver itens no edital: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros". Para CADA linha do edital em cada seção, inclua um item com: referencia (número/item do edital, ex: 6.2.1.1.1, 8.2. - a.1), local (TR ou ED quando o edital indicar), documento (texto completo do documento exigido), solicitado (true se o edital exige SIM), status (string vazia se não aplicável), observacao (quando houver). Extraia TODOS os itens de Atestado Técnico / especificação técnica listados no edital, não apenas um resumo.
+1) IDENTIFICAÇÃO DO EDITAL: Extraia órgão, número do edital, objeto (resumo do objeto da licitação), data da sessão (formato DD/MM/AAAA HH:MM quando houver), portal (ex.: Licitar Digital), número do processo interno (Nº ADM ou similar), valor total em R$ (por extenso quando houver), vigência do contrato, modalidade/concessionária (ex.: Neoenergia Pernambuco), prazo início injeção e valor/volume de energia quando aplicável.
 
-Declaração de Visita Técnica: preencha visitaTecnica true se o edital exigir visita técnica obrigatória.
+2) MODALIDADE E PARTICIPAÇÃO: Modalidade da licitação (ex.: Pregão Eletrônico). Permite consórcio? Benefícios a MPE? Item do edital que trata disso (referência).
 
-Ao final, dê uma pontuação de 0-100 (valor do contrato, clareza, viabilidade de participação, prazos) e uma recomendação curta."""
+3) PRAZOS: Para cada prazo (enviar proposta, esclarecimentos, impugnação), preencha data e horário separadamente. Ex.: "Enviar proposta até 10/02/2026 9h00" → enviarPropostaAte: { "data": "10/02/2026", "horario": "9h00" }. Inclua contato para envio de esclarecimento/impugnação quando informado.
+
+4) DOCUMENTOS: Agrupe por categoria. Use exatamente: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros". Para CADA item do edital inclua: referencia (número/item, ex: 6.2.1.1.1), local (TR ou ED quando indicado), documento (texto completo exigido), solicitado (true se exigido), status (vazio), observacao (quando houver). Extraia TODOS os itens listados, não resuma.
+
+5) VISITA TÉCNICA E PROPOSTA: visitaTecnica = true apenas se o edital exigir visita técnica obrigatória. Validade da proposta (prazo em dias ou texto).
+
+6) SESSÃO E OUTROS: Diferença entre lances, prazo para proposta ajustada, aberto/fechado. Mecanismo de pagamento quando citado.
+
+7) ANÁLISE: Pontuação 0-100 (valor do contrato, clareza, viabilidade, prazos) e recomendação curta."""
 
 CHECKLIST_JSON_SCHEMA = {
     "type": "object",
@@ -189,6 +199,358 @@ CHECKLIST_JSON_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+
+# --- Per-block extraction: schema + prompt for each checklist section (improves accuracy) ---
+CHECKLIST_BLOCKS = [
+    {
+        "key": "edital",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "edital": {
+                    "type": "object",
+                    "properties": {
+                        "licitacao": {"type": "string"},
+                        "edital": {"type": "string"},
+                        "orgao": {"type": "string"},
+                        "objeto": {"type": "string"},
+                        "dataSessao": {"type": "string"},
+                        "portal": {"type": "string"},
+                        "numeroProcessoInterno": {"type": "string"},
+                        "totalReais": {"type": "string"},
+                        "valorEnergia": {"type": "string"},
+                        "volumeEnergia": {"type": "string"},
+                        "vigenciaContrato": {"type": "string"},
+                        "modalidadeConcessionaria": {"type": "string"},
+                        "prazoInicioInjecao": {"type": "string"},
+                    },
+                    "required": [
+                        "licitacao", "edital", "orgao", "objeto", "dataSessao", "portal",
+                        "numeroProcessoInterno", "totalReais", "valorEnergia", "volumeEnergia",
+                        "vigenciaContrato", "modalidadeConcessionaria", "prazoInicioInjecao",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["edital"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Sua tarefa é extrair APENAS os dados de IDENTIFICAÇÃO DO EDITAL.
+
+No contexto do documento, localize e preencha:
+- licitacao: órgão ou entidade realizadora (ex.: PREFEITURA DE RECIFE)
+- edital: número do edital (ex.: 026/2025-GC-SEPLAG-007)
+- orgao: órgão/administração (ex.: Prefeitura da Cidade do Recife)
+- objeto: resumo do objeto da licitação (registro de preços, fornecimento, etc.)
+- dataSessao: data e horário da sessão (formato DD/MM/AAAA HH:MM ou similar; ex.: 10/02/2026 09:00:00)
+- portal: nome do portal (ex.: Licitar Digital)
+- numeroProcessoInterno: número do processo/ADM (ex.: 81800)
+- totalReais: valor total em R$ (número e/ou por extenso quando houver)
+- valorEnergia, volumeEnergia: quando o edital for de energia
+- vigenciaContrato: prazo (ex.: 12 meses, Registro de Preço)
+- modalidadeConcessionaria: modalidade e concessionária (ex.: Neoenergia Pernambuco)
+- prazoInicioInjecao: quando aplicável
+
+Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""",
+    },
+    {
+        "key": "modalidade_participacao",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "modalidadeLicitacao": {"type": "string"},
+                "participacao": {
+                    "type": "object",
+                    "properties": {
+                        "permiteConsorcio": {"type": "boolean"},
+                        "beneficiosMPE": {"type": "boolean"},
+                        "itemEdital": {"type": "string"},
+                    },
+                    "required": ["permiteConsorcio", "beneficiosMPE", "itemEdital"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["modalidadeLicitacao", "participacao"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS MODALIDADE E PARTICIPAÇÃO.
+
+- modalidadeLicitacao: tipo da licitação (ex.: Pregão Eletrônico, Concorrência).
+- participacao.permiteConsorcio: true somente se o edital PERMITE participação em consórcio; false se não permite ou não mencionar.
+- participacao.beneficiosMPE: true somente se há benefícios a microempresa/pequeno porte; false caso contrário.
+- participacao.itemEdital: referência ou trecho do edital que trata de participação/consórcio/MPE (ou string vazia).
+
+Use false para booleanos quando não aplicável ou não informado.""",
+    },
+    {
+        "key": "prazos",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "prazos": {
+                    "type": "object",
+                    "properties": {
+                        "enviarPropostaAte": {
+                            "type": "object",
+                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                            "required": ["data", "horario"],
+                            "additionalProperties": False,
+                        },
+                        "esclarecimentosAte": {
+                            "type": "object",
+                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                            "required": ["data", "horario"],
+                            "additionalProperties": False,
+                        },
+                        "impugnacaoAte": {
+                            "type": "object",
+                            "properties": {"data": {"type": "string"}, "horario": {"type": "string"}},
+                            "required": ["data", "horario"],
+                            "additionalProperties": False,
+                        },
+                        "contatoEsclarecimentoImpugnacao": {"type": "string"},
+                    },
+                    "required": [
+                        "enviarPropostaAte", "esclarecimentosAte", "impugnacaoAte",
+                        "contatoEsclarecimentoImpugnacao",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["prazos"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS os PRAZOS do edital.
+
+Para cada prazo, preencha data e horário separadamente:
+- enviarPropostaAte: data e horário limite para envio da proposta (ex.: "10/02/2026" e "9H00" ou "9h00")
+- esclarecimentosAte: data e horário limite para pedidos de esclarecimento
+- impugnacaoAte: data e horário limite para impugnação
+- contatoEsclarecimentoImpugnacao: canal ou sistema para envio (ex.: LICITAR DIGITAL - sistema do certame)
+
+Use strings vazias para data/horário quando não encontrado. Mantenha o formato de data como no edital (DD/MM/AAAA) e horário como informado.""",
+    },
+    {
+        "key": "documentos",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "documentos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "categoria": {"type": "string"},
+                            "itens": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "referencia": {"type": "string"},
+                                        "local": {"type": "string"},
+                                        "documento": {"type": "string"},
+                                        "solicitado": {"type": "boolean"},
+                                        "status": {"type": "string"},
+                                        "observacao": {"type": "string"},
+                                    },
+                                    "required": ["referencia", "local", "documento", "solicitado", "status", "observacao"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["categoria", "itens"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["documentos"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS a lista de DOCUMENTOS E QUALIFICAÇÃO exigidos pelo edital.
+
+Agrupe por categoria. Use exatamente estas categorias quando houver itens: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros".
+
+Para CADA item exigido no edital, inclua um elemento em itens com:
+- referencia: número ou item do edital (ex.: 6.2.1.1.1, 8.2 - a.1)
+- local: TR ou ED quando o edital indicar (termo de referência ou edital)
+- documento: texto completo do documento exigido (não resuma)
+- solicitado: true se o edital exige o documento
+- status: string vazia
+- observacao: quando houver
+
+Extraia TODOS os itens listados (atestados técnicos, especificação técnica, documentação, etc.), um por um. Não agrupe em um único resumo. Retorne array vazio se não houver seção de documentos.""",
+    },
+    {
+        "key": "visita_proposta",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "visitaTecnica": {"type": "boolean"},
+                "proposta": {
+                    "type": "object",
+                    "properties": {"validadeProposta": {"type": "string"}},
+                    "required": ["validadeProposta"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["visitaTecnica", "proposta"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS VISITA TÉCNICA e PROPOSTA.
+
+- visitaTecnica: true SOMENTE se o edital exigir visita técnica OBRIGATÓRIA; false se não obrigatória ou não mencionada.
+- proposta.validadeProposta: prazo de validade da proposta (ex.: 60 dias, até a sessão, ou texto do edital). Use string vazia se não informado.""",
+    },
+    {
+        "key": "sessao_outros",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "sessao": {
+                    "type": "object",
+                    "properties": {
+                        "diferencaEntreLances": {"type": "string"},
+                        "horasPropostaAjustada": {"type": "string"},
+                        "abertoFechado": {"type": "string"},
+                    },
+                    "required": ["diferencaEntreLances", "horasPropostaAjustada", "abertoFechado"],
+                    "additionalProperties": False,
+                },
+                "outrosEdital": {
+                    "type": "object",
+                    "properties": {"mecanismoPagamento": {"type": "string"}},
+                    "required": ["mecanismoPagamento"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["sessao", "outrosEdital"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS dados da SESSÃO e OUTROS do edital.
+
+- sessao.diferencaEntreLances: valor ou percentual mínimo entre lances (quando aplicável)
+- sessao.horasPropostaAjustada: prazo para proposta ajustada (quando aplicável)
+- sessao.abertoFechado: se sessão é aberta ou fechada (quando aplicável)
+- outrosEdital.mecanismoPagamento: forma de pagamento (ex.: faturamento, medição). Use string vazia quando não encontrado.""",
+    },
+    {
+        "key": "analise",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "responsavelAnalise": {"type": "string"},
+                "pontuacao": {"type": "integer"},
+                "recomendacao": {"type": "string"},
+            },
+            "required": ["responsavelAnalise", "pontuacao", "recomendacao"],
+            "additionalProperties": False,
+        },
+        "system_prompt": """Você é um especialista em licitações brasileiras. Com base no edital analisado, preencha a ANÁLISE FINAL.
+
+- responsavelAnalise: string vazia (campo para preenchimento posterior pelo usuário).
+- pontuacao: número inteiro de 0 a 100, considerando: valor do contrato, clareza do edital, viabilidade de participação e prazos.
+- recomendacao: uma ou duas frases com recomendação objetiva (ex.: "Recomenda-se participar; prazos adequados e documentação clara." ou "Atenção ao prazo curto para esclarecimentos.").""",
+    },
+]
+
+
+def _deep_merge_checklist(base: dict, block_result: dict) -> None:
+    """Merge block_result into base in-place. For lists (e.g. documentos), replace; for dicts, deep merge."""
+    for key, value in block_result.items():
+        if key not in base:
+            base[key] = value
+        elif isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge_checklist(base[key], value)
+        elif isinstance(value, list):
+            base[key] = value
+        else:
+            base[key] = value
+
+
+def _generate_one_block(
+    openai_client: OpenAI,
+    block: dict,
+    context: str,
+    file_name: str,
+) -> dict:
+    """Call LLM for a single checklist block; return the block result (subset of full checklist)."""
+    name = block["key"]
+    schema = block["schema"]
+    system = block["system_prompt"]
+    user_content = f"Contexto do documento ({file_name or 'document'}):\n\n{context}\n\nExtraia apenas a parte do checklist correspondente a este bloco e retorne em JSON."
+    resp = openai_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": f"checklist_block_{name}",
+                "strict": True,
+                "schema": schema,
+            },
+        },
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    data = json.loads(raw)
+    return data
+
+
+def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
+    """Generate checklist by running one LLM call per block and merging. Returns (checklist dict, debug payload)."""
+    logger.info("Generating checklist by blocks: fileName=%s context_len=%d blocks=%d", file_name or "document", len(context), len(CHECKLIST_BLOCKS))
+    merged = {}
+    raw_by_block = {}
+    for block in CHECKLIST_BLOCKS:
+        name = block["key"]
+        try:
+            block_data = _generate_one_block(openai_client, block, context, file_name)
+            raw_by_block[name] = block_data
+            if name == "modalidade_participacao":
+                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
+                merged["participacao"] = block_data.get("participacao") or {}
+            else:
+                _deep_merge_checklist(merged, block_data)
+        except Exception as e:
+            logger.warning("Block %s failed: %s", name, e)
+            raw_by_block[name] = {"_error": str(e)}
+    # Ensure all required top-level keys exist for full schema
+    default_edital = {
+        "licitacao": "", "edital": "", "orgao": "", "objeto": "", "dataSessao": "", "portal": "",
+        "numeroProcessoInterno": "", "totalReais": "", "valorEnergia": "", "volumeEnergia": "",
+        "vigenciaContrato": "", "modalidadeConcessionaria": "", "prazoInicioInjecao": "",
+    }
+    for key in CHECKLIST_JSON_SCHEMA.get("required", []):
+        if key not in merged:
+            if key == "edital":
+                merged["edital"] = default_edital.copy()
+            elif key == "documentos":
+                merged["documentos"] = []
+            elif key == "participacao":
+                merged["participacao"] = {"permiteConsorcio": False, "beneficiosMPE": False, "itemEdital": ""}
+            elif key == "proposta":
+                merged["proposta"] = {"validadeProposta": ""}
+            elif key == "sessao":
+                merged["sessao"] = {"diferencaEntreLances": "", "horasPropostaAjustada": "", "abertoFechado": ""}
+            elif key == "outrosEdital":
+                merged["outrosEdital"] = {"mecanismoPagamento": ""}
+            elif key == "pontuacao":
+                merged["pontuacao"] = 0
+            elif key in ("responsavelAnalise", "recomendacao"):
+                merged[key] = ""
+            elif key == "visitaTecnica":
+                merged["visitaTecnica"] = False
+            else:
+                merged[key] = ""
+    openai_debug = {
+        "mode": "blocks",
+        "blocks": list(b["key"] for b in CHECKLIST_BLOCKS),
+        "raw_by_block": raw_by_block,
+    }
+    logger.info("Checklist blocks merged: fileName=%s", file_name or "document")
+    return merged, openai_debug
 
 
 def get_conn():
@@ -655,7 +1017,10 @@ def process_job(payload: dict):
                     logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
                     context = build_full_document_context(chunks_text)
 
-                checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
+                if USE_CHECKLIST_BLOCKS:
+                    checklist_data, checklist_openai_debug = generate_checklist_blocks(openai_client, context, file_name)
+                else:
+                    checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
                 openai_debug = {"checklist": checklist_openai_debug}
                 upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
                 insert_checklist(conn, user_id, file_name, checklist_data, document_id)
