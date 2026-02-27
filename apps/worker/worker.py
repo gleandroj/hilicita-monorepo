@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 Document ingest worker: consumes Redis queue, downloads file from presigned URL,
-parses with open-source unstructured library, and generates a checklist by sending
-all parsed elements into the LLM prompt. Vector store is disabled by default but
-can be re-enabled for semantic search over the document later.
-Updates document status in Postgres.
+parses with unstructured, builds normalized chunks with embeddings, and generates
+a checklist via retrieval-driven block extraction (one LLM call per block with
+block-specific context). Updates document status in Postgres.
 """
 import os
+import re
 import json
 import time
+import math
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,7 +43,31 @@ CHAT_MODEL = "gpt-4o-mini"
 CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
 TOP_K = 10
 
-# When False, checklist uses full document text in the prompt; vector store is skipped (can re-enable later).
+# --- Retrieval-driven block extraction (default for checklist blocks) ---
+CHUNK_MIN_CHARS = 800
+CHUNK_MAX_CHARS = 1200
+EMBEDDING_MODEL = "text-embedding-3-large"
+TOP_K_RETRIEVAL = 12  # 8–15 per block
+EVIDENCE_PROMPT_SUFFIX = """
+
+Use ONLY the provided excerpts. If information is missing, return empty values. Do not infer or guess.
+Every extracted field must be traceable to text evidence."""
+
+# Heading patterns for section_hint (Brazilian bidding documents): (pattern, label)
+HEADING_PATTERNS = [
+    (re.compile(r"^\s*(\d+\.)\s", re.IGNORECASE), "numeric"),
+    (re.compile(r"\bITEM\s+\d+", re.IGNORECASE), "ITEM"),
+    (re.compile(r"\bCLÁUSULA\s+\d+", re.IGNORECASE), "CLÁUSULA"),
+    (re.compile(r"\bDO\s+PRAZO\b", re.IGNORECASE), "DO PRAZO"),
+    (re.compile(r"\bDOCUMENTAÇÃO\b", re.IGNORECASE), "DOCUMENTAÇÃO"),
+    (re.compile(r"\bQUALIFICAÇÃO\b", re.IGNORECASE), "QUALIFICAÇÃO"),
+    (re.compile(r"\bHABILITAÇÃO\b", re.IGNORECASE), "HABILITAÇÃO"),
+    (re.compile(r"\bPRAZOS\b", re.IGNORECASE), "PRAZOS"),
+    (re.compile(r"\bIDENTIFICAÇÃO\b", re.IGNORECASE), "IDENTIFICAÇÃO"),
+    (re.compile(r"\bSESSÃO\b", re.IGNORECASE), "SESSÃO"),
+]
+
+# When False, checklist uses full document text in the prompt; vector store is skipped (legacy).
 USE_VECTOR_STORE = False
 
 # When True, send the PDF as file to OpenAI (Responses API input_file) instead of parsed structured elements.
@@ -200,10 +225,11 @@ CHECKLIST_JSON_SCHEMA = {
     "additionalProperties": False,
 }
 
-# --- Per-block extraction: schema + prompt for each checklist section (improves accuracy) ---
+# --- Per-block extraction: schema + prompt + retrieval query for each checklist section ---
 CHECKLIST_BLOCKS = [
     {
         "key": "edital",
+        "query": "órgão edital número processo objeto sessão portal licitação valor total vigência modalidade",
         "schema": {
             "type": "object",
             "properties": {
@@ -251,10 +277,11 @@ No contexto do documento, localize e preencha:
 - modalidadeConcessionaria: modalidade e concessionária (ex.: Neoenergia Pernambuco)
 - prazoInicioInjecao: quando aplicável
 
-Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""",
+Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "modalidade_participacao",
+        "query": "modalidade licitação pregão concorrência consórcio MPE microempresa participação",
         "schema": {
             "type": "object",
             "properties": {
@@ -280,10 +307,11 @@ Use string vazia ("") para qualquer campo não encontrado. Não invente dados.""
 - participacao.beneficiosMPE: true somente se há benefícios a microempresa/pequeno porte; false caso contrário.
 - participacao.itemEdital: referência ou trecho do edital que trata de participação/consórcio/MPE (ou string vazia).
 
-Use false para booleanos quando não aplicável ou não informado.""",
+Use false para booleanos quando não aplicável ou não informado.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "prazos",
+        "query": "prazo proposta esclarecimento impugnação data horário sessão envio limite",
         "schema": {
             "type": "object",
             "properties": {
@@ -328,10 +356,11 @@ Para cada prazo, preencha data e horário separadamente:
 - impugnacaoAte: data e horário limite para impugnação
 - contatoEsclarecimentoImpugnacao: canal ou sistema para envio (ex.: LICITAR DIGITAL - sistema do certame)
 
-Use strings vazias para data/horário quando não encontrado. Mantenha o formato de data como no edital (DD/MM/AAAA) e horário como informado.""",
+Use strings vazias para data/horário quando não encontrado. Mantenha o formato de data como no edital (DD/MM/AAAA) e horário como informado.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "documentos",
+        "query": "documentação habilitação qualificação técnica fiscal jurídica atestado declaração proposta exigido",
         "schema": {
             "type": "object",
             "properties": {
@@ -378,10 +407,11 @@ Para CADA item exigido no edital, inclua um elemento em itens com:
 - status: string vazia
 - observacao: quando houver
 
-Extraia TODOS os itens listados (atestados técnicos, especificação técnica, documentação, etc.), um por um. Não agrupe em um único resumo. Retorne array vazio se não houver seção de documentos.""",
+Extraia TODOS os itens listados (atestados técnicos, especificação técnica, documentação, etc.), um por um. Não agrupe em um único resumo. Retorne array vazio se não houver seção de documentos.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "visita_proposta",
+        "query": "visita técnica obrigatória validade proposta prazo dias",
         "schema": {
             "type": "object",
             "properties": {
@@ -399,10 +429,11 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
         "system_prompt": """Você é um especialista em licitações brasileiras. Extraia APENAS VISITA TÉCNICA e PROPOSTA.
 
 - visitaTecnica: true SOMENTE se o edital exigir visita técnica OBRIGATÓRIA; false se não obrigatória ou não mencionada.
-- proposta.validadeProposta: prazo de validade da proposta (ex.: 60 dias, até a sessão, ou texto do edital). Use string vazia se não informado.""",
+- proposta.validadeProposta: prazo de validade da proposta (ex.: 60 dias, até a sessão, ou texto do edital). Use string vazia se não informado.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "sessao_outros",
+        "query": "lances aberto fechado proposta ajustada intervalo diferença pagamento mecanismo",
         "schema": {
             "type": "object",
             "properties": {
@@ -431,10 +462,11 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
 - sessao.diferencaEntreLances: valor ou percentual mínimo entre lances (quando aplicável)
 - sessao.horasPropostaAjustada: prazo para proposta ajustada (quando aplicável)
 - sessao.abertoFechado: se sessão é aberta ou fechada (quando aplicável)
-- outrosEdital.mecanismoPagamento: forma de pagamento (ex.: faturamento, medição). Use string vazia quando não encontrado.""",
+- outrosEdital.mecanismoPagamento: forma de pagamento (ex.: faturamento, medição). Use string vazia quando não encontrado.""" + EVIDENCE_PROMPT_SUFFIX,
     },
     {
         "key": "analise",
+        "query": "valor contrato clareza viabilidade prazos recomendação análise",
         "schema": {
             "type": "object",
             "properties": {
@@ -449,7 +481,7 @@ Extraia TODOS os itens listados (atestados técnicos, especificação técnica, 
 
 - responsavelAnalise: string vazia (campo para preenchimento posterior pelo usuário).
 - pontuacao: número inteiro de 0 a 100, considerando: valor do contrato, clareza do edital, viabilidade de participação e prazos.
-- recomendacao: uma ou duas frases com recomendação objetiva (ex.: "Recomenda-se participar; prazos adequados e documentação clara." ou "Atenção ao prazo curto para esclarecimentos.").""",
+- recomendacao: uma ou duas frases com recomendação objetiva (ex.: "Recomenda-se participar; prazos adequados e documentação clara." ou "Atenção ao prazo curto para esclarecimentos.").""" + EVIDENCE_PROMPT_SUFFIX,
     },
 ]
 
@@ -472,12 +504,15 @@ def _generate_one_block(
     block: dict,
     context: str,
     file_name: str,
-) -> dict:
-    """Call LLM for a single checklist block; return the block result (subset of full checklist)."""
+) -> tuple[dict, str]:
+    """Call LLM for a single checklist block; return (block result dict, raw JSON string)."""
     name = block["key"]
     schema = block["schema"]
     system = block["system_prompt"]
-    user_content = f"Contexto do documento ({file_name or 'document'}):\n\n{context}\n\nExtraia apenas a parte do checklist correspondente a este bloco e retorne em JSON."
+    user_content = (
+        f"Trechos do documento ({file_name or 'document'}):\n\n{context}\n\n"
+        "Extraia apenas a parte do checklist correspondente a este bloco com base EXCLUSIVAMENTE nos trechos acima. Retorne em JSON."
+    )
     resp = openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[
@@ -495,18 +530,18 @@ def _generate_one_block(
     )
     raw = (resp.choices[0].message.content or "").strip()
     data = json.loads(raw)
-    return data
+    return data, raw
 
 
 def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
-    """Generate checklist by running one LLM call per block and merging. Returns (checklist dict, debug payload)."""
+    """Generate checklist by running one LLM call per block and merging (full context). Returns (checklist dict, debug payload)."""
     logger.info("Generating checklist by blocks: fileName=%s context_len=%d blocks=%d", file_name or "document", len(context), len(CHECKLIST_BLOCKS))
     merged = {}
     raw_by_block = {}
     for block in CHECKLIST_BLOCKS:
         name = block["key"]
         try:
-            block_data = _generate_one_block(openai_client, block, context, file_name)
+            block_data, raw = _generate_one_block(openai_client, block, context, file_name)
             raw_by_block[name] = block_data
             if name == "modalidade_participacao":
                 merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
@@ -516,7 +551,18 @@ def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: st
         except Exception as e:
             logger.warning("Block %s failed: %s", name, e)
             raw_by_block[name] = {"_error": str(e)}
-    # Ensure all required top-level keys exist for full schema
+    _fill_checklist_defaults(merged)
+    openai_debug = {
+        "mode": "blocks",
+        "blocks": list(b["key"] for b in CHECKLIST_BLOCKS),
+        "raw_by_block": raw_by_block,
+    }
+    logger.info("Checklist blocks merged: fileName=%s", file_name or "document")
+    return merged, openai_debug
+
+
+def _fill_checklist_defaults(merged: dict) -> None:
+    """Ensure all required top-level keys exist (in-place)."""
     default_edital = {
         "licitacao": "", "edital": "", "orgao": "", "objeto": "", "dataSessao": "", "portal": "",
         "numeroProcessoInterno": "", "totalReais": "", "valorEnergia": "", "volumeEnergia": "",
@@ -544,13 +590,148 @@ def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: st
                 merged["visitaTecnica"] = False
             else:
                 merged[key] = ""
+
+
+def generate_checklist_blocks_retrieval(
+    openai_client: OpenAI,
+    normalized_chunks: list[dict],
+    file_name: str,
+) -> tuple[dict, dict]:
+    """Retrieval-driven: one LLM call per block with block-specific context only. Returns (checklist dict, debug payload)."""
+    logger.info(
+        "Generating checklist by retrieval-driven blocks: fileName=%s chunks=%d blocks=%d",
+        file_name or "document", len(normalized_chunks), len(CHECKLIST_BLOCKS),
+    )
+    chunks_with_embeddings = embed_chunks(openai_client, normalized_chunks)
+    merged = {}
+    raw_by_block = {}
+    blocks_debug = []
+
+    for block in CHECKLIST_BLOCKS:
+        name = block["key"]
+        query = block.get("query", name.replace("_", " "))
+        try:
+            context, retrieved_chunks = retrieve_for_block(
+                openai_client, query, chunks_with_embeddings, top_k=TOP_K_RETRIEVAL
+            )
+            block_data, raw = _generate_one_block(openai_client, block, context, file_name)
+            raw_by_block[name] = block_data
+            if name == "modalidade_participacao":
+                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
+                merged["participacao"] = block_data.get("participacao") or {}
+            else:
+                _deep_merge_checklist(merged, block_data)
+            llm_input = (
+                f"Trechos do documento ({file_name or 'document'}):\n\n{context}\n\n"
+                "Extraia apenas a parte do checklist correspondente a este bloco com base EXCLUSIVAMENTE nos trechos acima. Retorne em JSON."
+            )
+            blocks_debug.append({
+                "block": name,
+                "query": query,
+                "retrieved_chunks": [{"chunk_id": c.get("chunk_id"), "page": c.get("page_number"), "text_preview": (c.get("text") or "")[:200]} for c in retrieved_chunks],
+                "context_len": len(context),
+                "llm_input": llm_input[:8000],
+                "llm_output": raw[:2000] if raw else "",
+            })
+        except Exception as e:
+            logger.warning("Block %s failed: %s", name, e)
+            raw_by_block[name] = {"_error": str(e)}
+            blocks_debug.append({"block": name, "query": query, "error": str(e)})
+
+    _fill_checklist_defaults(merged)
+    merged = normalize_checklist_result(merged)
     openai_debug = {
-        "mode": "blocks",
+        "mode": "blocks_retrieval",
         "blocks": list(b["key"] for b in CHECKLIST_BLOCKS),
         "raw_by_block": raw_by_block,
+        "blocks_debug": blocks_debug,
     }
-    logger.info("Checklist blocks merged: fileName=%s", file_name or "document")
+    logger.info("Checklist blocks (retrieval) merged: fileName=%s", file_name or "document")
     return merged, openai_debug
+
+
+# --- Post-processing: dates, currency, dedup, boolean defaults ---
+DATE_DDMMYYYY = re.compile(r"(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})")
+
+
+def _normalize_date(s: str) -> str:
+    """Normalize date to DD/MM/YYYY when possible."""
+    if not s or not isinstance(s, str):
+        return s or ""
+    s = s.strip()
+    m = DATE_DDMMYYYY.search(s)
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        return f"{int(d):02d}/{int(mo):02d}/{y}"
+    return s
+
+
+def _normalize_currency(s: str) -> str:
+    """Ensure currency is prefixed with R$ when it looks like a value."""
+    if not s or not isinstance(s, str):
+        return s or ""
+    s = s.strip()
+    if s and re.search(r"[\d.,]+", s) and not s.upper().startswith("R$"):
+        return "R$ " + s
+    return s
+
+
+def normalize_checklist_result(data: dict) -> dict:
+    """Apply accuracy safeguards: normalize dates (DD/MM/YYYY), currency (R$), dedup document items, boolean defaults."""
+    if not data:
+        return data
+    # Edital dates
+    ed = data.get("edital") or {}
+    if isinstance(ed, dict):
+        for key in ("dataSessao",):
+            if key in ed and ed[key]:
+                ed[key] = _normalize_date(ed[key])
+        for key in ("totalReais", "valorEnergia", "volumeEnergia"):
+            if key in ed and ed[key]:
+                ed[key] = _normalize_currency(ed[key])
+    # Prazos dates
+    prazos = data.get("prazos") or {}
+    if isinstance(prazos, dict):
+        for sub in ("enviarPropostaAte", "esclarecimentosAte", "impugnacaoAte"):
+            obj = prazos.get(sub)
+            if isinstance(obj, dict) and obj.get("data"):
+                obj["data"] = _normalize_date(obj["data"])
+    # Participação booleans
+    part = data.get("participacao") or {}
+    if isinstance(part, dict):
+        part.setdefault("permiteConsorcio", False)
+        part.setdefault("beneficiosMPE", False)
+        if "permiteConsorcio" in part and not isinstance(part["permiteConsorcio"], bool):
+            part["permiteConsorcio"] = bool(part["permiteConsorcio"])
+        if "beneficiosMPE" in part and not isinstance(part["beneficiosMPE"], bool):
+            part["beneficiosMPE"] = bool(part["beneficiosMPE"])
+    data.setdefault("visitaTecnica", False)
+    if not isinstance(data.get("visitaTecnica"), bool):
+        data["visitaTecnica"] = bool(data.get("visitaTecnica"))
+    # Remove duplicated document items (by documento text)
+    docs = data.get("documentos") or []
+    if isinstance(docs, list):
+        seen = set()
+        out = []
+        for cat in docs:
+            if not isinstance(cat, dict):
+                out.append(cat)
+                continue
+            itens = cat.get("itens") or []
+            new_itens = []
+            for it in itens:
+                if not isinstance(it, dict):
+                    new_itens.append(it)
+                    continue
+                doc_text = (it.get("documento") or "").strip()
+                key = (doc_text, it.get("referencia", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                new_itens.append(it)
+            out.append({**cat, "itens": new_itens})
+        data["documentos"] = out
+    return data
 
 
 def get_conn():
@@ -645,6 +826,147 @@ def upload_debug_json(user_id: str, document_id: str, data: dict, suffix: str = 
 
 # Language for unstructured partition (OCR and partitioning). "por" = Portuguese (pt-BR).
 PARTITION_LANGUAGES = ["por"]
+
+
+def _detect_section_hint(text: str) -> str:
+    """Detect section heading from text (first ~500 chars) for Brazilian bidding docs."""
+    if not text or not text.strip():
+        return ""
+    sample = text.strip()[:500] + "\n"
+    for pattern, label in HEADING_PATTERNS:
+        if pattern.search(sample):
+            return label
+    return ""
+
+
+def _split_into_size_chunks(
+    text: str, page_number: int | None, section_hint: str, chunk_id_prefix: str
+) -> list[dict]:
+    """Split text into chunks of CHUNK_MIN_CHARS–CHUNK_MAX_CHARS; preserve section_hint on first chunk."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks_out = []
+    start = 0
+    idx = 0
+    while start < len(text):
+        end = min(start + CHUNK_MAX_CHARS, len(text))
+        if end < len(text):
+            # Prefer break at paragraph or sentence
+            break_at = text.rfind("\n\n", start, end + 1)
+            if break_at == -1:
+                break_at = text.rfind(". ", start, end + 1)
+            if break_at == -1:
+                break_at = text.rfind(" ", start, end + 1)
+            if break_at > start and (break_at - start) >= CHUNK_MIN_CHARS:
+                end = break_at + 1
+        chunk_text = text[start:end].strip()
+        if chunk_text:
+            chunks_out.append({
+                "text": chunk_text,
+                "page_number": page_number,
+                "section_hint": section_hint if idx == 0 else "",
+                "chunk_id": f"{chunk_id_prefix}_{idx}",
+            })
+            idx += 1
+        start = end
+    return chunks_out
+
+
+def parse_file_to_normalized_chunks(file_path: str, file_name: str) -> tuple[list[dict], dict]:
+    """Parse file with unstructured, return normalized chunks (800–1200 chars) with metadata.
+    Merges consecutive elements into chunks of CHUNK_MIN_CHARS–CHUNK_MAX_CHARS to avoid
+    thousands of tiny chunks. Each chunk: { text, page_number, section_hint, chunk_id }.
+    """
+    logger.info("Parsing file to normalized chunks: path=%s fileName=%s", file_path, file_name or "document")
+    elements = partition(filename=file_path, languages=PARTITION_LANGUAGES)
+    logger.info("Partition produced %d elements", len(elements))
+    # Build (text, page_number, section_hint) per element, then merge into 800–1200 char chunks
+    segment_list = []
+    for el in elements:
+        text = getattr(el, "text", None) or str(el)
+        if not text or not text.strip():
+            continue
+        meta = getattr(el, "metadata", None)
+        page_number = getattr(meta, "page_number", None) if meta else None
+        if page_number is not None and not isinstance(page_number, int):
+            try:
+                page_number = int(page_number)
+            except (TypeError, ValueError):
+                page_number = None
+        section_hint = _detect_section_hint(text)
+        segment_list.append({"text": text.strip(), "page_number": page_number, "section_hint": section_hint})
+    # Merge segments into chunks of target size (800–1200 chars)
+    all_chunks = []
+    elements_debug = [{"segment_count": len(segment_list)}]
+    base_id = str(uuid.uuid4())[:8]
+    buf_text = []
+    buf_page = None
+    buf_hint = ""
+    buf_len = 0
+    chunk_idx = 0
+    for seg in segment_list:
+        t = seg["text"]
+        if buf_page is None:
+            buf_page = seg.get("page_number")
+        if not buf_hint and seg.get("section_hint"):
+            buf_hint = seg.get("section_hint")
+        buf_text.append(t)
+        buf_len = len(CHUNK_SEP.join(buf_text))
+        # Flush when we have enough or adding more would exceed max
+        should_flush = buf_len >= CHUNK_MIN_CHARS
+        if should_flush or (buf_len > CHUNK_MAX_CHARS):
+            combined = CHUNK_SEP.join(buf_text)
+            if len(combined) > CHUNK_MAX_CHARS:
+                sub_chunks = _split_into_size_chunks(combined, buf_page, buf_hint or _detect_section_hint(combined), f"{base_id}_c{chunk_idx}")
+                for c in sub_chunks:
+                    all_chunks.append(c)
+                    chunk_idx += 1
+            else:
+                all_chunks.append({
+                    "text": combined,
+                    "page_number": buf_page,
+                    "section_hint": buf_hint or _detect_section_hint(combined),
+                    "chunk_id": f"{base_id}_c{chunk_idx}",
+                })
+                chunk_idx += 1
+            buf_text = []
+            buf_len = 0
+            buf_page = None
+            buf_hint = ""
+    if buf_text:
+        combined = CHUNK_SEP.join(buf_text)
+        sub_chunks = _split_into_size_chunks(combined, buf_page, buf_hint or _detect_section_hint(combined), f"{base_id}_c{chunk_idx}")
+        for c in sub_chunks:
+            all_chunks.append(c)
+    if not all_chunks:
+        try:
+            with open(file_path, "r", errors="replace") as f:
+                raw = f.read(50000)
+                if raw.strip():
+                    all_chunks = [{
+                        "text": raw.strip()[:CHUNK_MAX_CHARS],
+                        "page_number": None,
+                        "section_hint": "",
+                        "chunk_id": f"{base_id}_fallback",
+                    }]
+        except Exception:
+            pass
+        if not all_chunks:
+            all_chunks = [{
+                "text": "(no text extracted)",
+                "page_number": None,
+                "section_hint": "",
+                "chunk_id": f"{base_id}_empty",
+            }]
+    logger.info("Normalized chunks: %d (avg ~%d chars)", len(all_chunks), sum(len(c["text"]) for c in all_chunks) // max(1, len(all_chunks)))
+    debug_payload = {
+        "fileName": file_name or "document",
+        "elementCount": len(elements),
+        "elements": elements_debug,
+        "chunkCount": len(all_chunks),
+    }
+    return all_chunks, debug_payload
 
 
 def parse_file(file_path: str, file_name: str) -> tuple[list[str], dict]:
@@ -802,6 +1124,77 @@ def search_vector_store(
 def build_full_document_context(chunks: list[str]) -> str:
     """Build context string from all Unstructured elements (chunks); no truncation."""
     return CHUNK_SEP.join(c.strip() for c in chunks if c and c.strip())
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors (pure Python, no numpy)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+# OpenAI embeddings API accepts at most 2048 inputs per request.
+EMBEDDING_BATCH_SIZE = 2048
+
+
+def embed_chunks(openai_client: OpenAI, chunks: list[dict]) -> list[tuple[dict, list[float]]]:
+    """Embed each chunk's text with text-embedding-3-large. Batches requests to respect API limit (2048 inputs)."""
+    if not chunks:
+        return []
+    # Ensure non-empty strings; API rejects invalid input
+    chunks = [c for c in chunks if (c.get("text") or "").strip()]
+    if not chunks:
+        return []
+    texts = [c["text"].strip() for c in chunks]
+    logger.info("Embedding %d chunks with %s (batch size %d)", len(texts), EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE)
+    out = []
+    for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch_texts = texts[start : start + EMBEDDING_BATCH_SIZE]
+        batch_chunks = chunks[start : start + EMBEDDING_BATCH_SIZE]
+        resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch_texts)
+        by_idx = {e.index: e.embedding for e in resp.data}
+        for i, ch in enumerate(batch_chunks):
+            emb = by_idx.get(i, [])
+            out.append((ch, emb))
+    return out
+
+
+def embed_query(openai_client: OpenAI, query: str) -> list[float]:
+    """Embed a single query string."""
+    resp = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=[query.strip() or " "])
+    if resp.data:
+        return resp.data[0].embedding
+    return []
+
+
+def retrieve_for_block(
+    openai_client: OpenAI,
+    query: str,
+    chunks_with_embeddings: list[tuple[dict, list[float]]],
+    top_k: int = TOP_K_RETRIEVAL,
+) -> tuple[str, list[dict]]:
+    """Run vector search for block query; return (context string, list of retrieved chunk dicts for debug)."""
+    if not chunks_with_embeddings:
+        return "", []
+    query_emb = embed_query(openai_client, query)
+    if not query_emb:
+        return "", []
+    scored = [
+        (_cosine_similarity(emb, query_emb), ch)
+        for ch, emb in chunks_with_embeddings
+        if emb
+    ]
+    scored.sort(key=lambda x: -x[0])
+    top = scored[:top_k]
+    retrieved = [ch for _, ch in top]
+    context = CHUNK_SEP.join(c["text"] for c in retrieved)
+    logger.debug("Retrieval query=%r top_k=%d retrieved=%d context_len=%d", query[:50], top_k, len(retrieved), len(context))
+    return context, retrieved
 
 
 def _upload_pdf_to_openai(openai_client: OpenAI, pdf_path: str, file_name: str) -> str:
@@ -998,29 +1391,39 @@ def process_job(payload: dict):
             finally:
                 conn.close()
         else:
-            logger.info("Parsing file for documentId=%s", document_id)
-            chunks_text, unstructured_debug = parse_file(temp_path, file_name)
-            upload_debug_json(user_id, document_id, unstructured_debug)
-            if not chunks_text:
-                raise ValueError("No content extracted")
             conn = get_conn()
             try:
-                if USE_VECTOR_STORE:
-                    logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
-                    vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
-                    logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
-                    update_document_vector_store(conn, document_id, vector_store_id)
-                    logger.info("Searching vector store for checklist context: documentId=%s", document_id)
-                    relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
-                    context = "\n\n".join(relevant)
-                else:
-                    logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
-                    context = build_full_document_context(chunks_text)
-
                 if USE_CHECKLIST_BLOCKS:
-                    checklist_data, checklist_openai_debug = generate_checklist_blocks(openai_client, context, file_name)
+                    # Retrieval-driven block extraction: normalized chunks → embeddings → one LLM call per block with block-specific context
+                    logger.info("Using retrieval-driven block extraction for documentId=%s", document_id)
+                    normalized_chunks, unstructured_debug = parse_file_to_normalized_chunks(temp_path, file_name)
+                    upload_debug_json(user_id, document_id, unstructured_debug)
+                    if not normalized_chunks:
+                        raise ValueError("No content extracted")
+                    checklist_data, checklist_openai_debug = generate_checklist_blocks_retrieval(
+                        openai_client, normalized_chunks, file_name
+                    )
                 else:
+                    # Legacy: full-document or vector-store context, single or multi-call
+                    logger.info("Parsing file for documentId=%s (legacy path)", document_id)
+                    chunks_text, unstructured_debug = parse_file(temp_path, file_name)
+                    upload_debug_json(user_id, document_id, unstructured_debug)
+                    if not chunks_text:
+                        raise ValueError("No content extracted")
+                    if USE_VECTOR_STORE:
+                        logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
+                        vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
+                        logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
+                        update_document_vector_store(conn, document_id, vector_store_id)
+                        logger.info("Searching vector store for checklist context: documentId=%s", document_id)
+                        relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
+                        context = "\n\n".join(relevant)
+                    else:
+                        logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
+                        context = build_full_document_context(chunks_text)
                     checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
+                    checklist_data = normalize_checklist_result(checklist_data)
+
                 openai_debug = {"checklist": checklist_openai_debug}
                 upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
                 insert_checklist(conn, user_id, file_name, checklist_data, document_id)
