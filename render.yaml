@@ -1,7 +1,7 @@
 # Render Blueprint: hilicita-monorepo (free tier where available)
 # Deploys: API (NestJS), Web (Next.js), Worker (Python), MinIO (private), Postgres, Redis (Key Value)
 # After first sync, set in Dashboard: OPENAI_API_KEY, BETTER_AUTH_SECRET, Google SSO (optional), and MinIO MINIO_ROOT_USER if you override default.
-# Note: Render free tier not available for background workers or private services (worker uses starter; MinIO uses starter + disk).
+# Note: Render free tier not available for background workers or private services (worker uses free; MinIO uses free + disk).
 
 databases:
   - name: hilicita-db
@@ -101,12 +101,12 @@ services:
       - key: NEXT_PUBLIC_API_URL
         sync: false
 
-  # Background worker (Python). Render has no free plan for workers; uses starter by default.
+  # Background worker (Python). Render has no free plan for workers; uses free by default.
   - type: worker
     name: worker
     runtime: python
     region: oregon
-    plan: starter
+    plan: free
     rootDir: apps/worker
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
