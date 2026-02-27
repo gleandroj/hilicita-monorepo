@@ -35,14 +35,23 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 QUEUE_NAME = "document:ingest"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT")
+def _minio_endpoint():
+    ep = os.environ.get("MINIO_ENDPOINT")
+    if ep:
+        return ep
+    host = os.environ.get("MINIO_HOST")
+    port = os.environ.get("MINIO_PORT")
+    if host and port:
+        return f"http://{host}:{port}"
+    return None
+
+
+MINIO_ENDPOINT = _minio_endpoint()
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "documents")
 # Model for checklist extraction. gpt-4o is more accurate for long editais and PDF-as-file (vision); override with OPENAI_CHAT_MODEL for cost/speed (e.g. gpt-4o-mini if hitting TPM limits).
 CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o")
-CHECKLIST_QUERY = "edital licitação órgão objeto valor total processo interno prazos proposta esclarecimento impugnação documentação qualificação técnica jurídica fiscal econômica visita técnica sessão"
-TOP_K = 10
 
 # --- Retrieval-driven block extraction (default for checklist blocks) ---
 CHUNK_MIN_CHARS = 800
@@ -115,36 +124,11 @@ HEADING_PATTERNS = [
     (re.compile(r"\bTERMO\s+DE\s+REFERÊNCIA\b", re.IGNORECASE), "TERMO DE REFERÊNCIA"),
 ]
 
-# When False, checklist uses full document text in the prompt; vector store is skipped (legacy).
-USE_VECTOR_STORE = False
-
 # When True, send the PDF as file to OpenAI (Responses API input_file) instead of parsed structured elements.
 # Can be overridden per job via payload "usePdfFile". Requires vision-capable model (e.g. gpt-4o, gpt-4o-mini).
 USE_PDF_AS_FILE = os.environ.get("USE_PDF_AS_FILE", "false").lower() in ("true", "1")
 
-# When True, generate checklist in multiple LLM calls (one per block) and merge. Improves accuracy for long editais.
-USE_CHECKLIST_BLOCKS = os.environ.get("USE_CHECKLIST_BLOCKS", "true").lower() in ("true", "1")
-
-# --- Single-call (legacy) system prompt: sectioned instructions for clarity when not using blocks ---
-CHECKLIST_SYSTEM_PROMPT = """Você é um especialista em licitações brasileiras. Preencha o checklist estruturado com base no documento do edital, seguindo o modelo padrão de checklist de licitação.
-
-Regras gerais: use string vazia quando não encontrar a informação; use false para campos booleanos quando não aplicável.
-
-1) IDENTIFICAÇÃO DO EDITAL: Extraia órgão, número do edital, objeto (resumo do objeto da licitação), data da sessão (formato DD/MM/AAAA HH:MM quando houver), portal (ex.: Licitar Digital), número do processo interno (Nº ADM ou similar), valor total em R$ (por extenso quando houver), vigência do contrato, modalidade/concessionária (ex.: Neoenergia Pernambuco), prazo início injeção e valor/volume de energia quando aplicável.
-
-2) MODALIDADE E PARTICIPAÇÃO: Modalidade da licitação (ex.: Pregão Eletrônico). Permite consórcio? Benefícios a MPE? Item do edital que trata disso (referência).
-
-3) PRAZOS: Para cada prazo (enviar proposta, esclarecimentos, impugnação), preencha data e horário separadamente. Ex.: "Enviar proposta até 10/02/2026 9h00" → enviarPropostaAte: { "data": "10/02/2026", "horario": "9h00" }. Inclua contato para envio de esclarecimento/impugnação quando informado.
-
-4) DOCUMENTOS: Agrupe por categoria. Use exatamente: "Atestado Técnico" (ou "QUALIFICAÇÃO TÉCNICA"), "Documentação", "Qualificação Jurídica-Fiscal", "Qualificação Econômica", "Declarações", "Proposta", "Outros". Para CADA item do edital inclua: referencia (número/item, ex: 6.2.1.1.1), local (TR ou ED quando indicado), documento (texto completo exigido), solicitado (true se exigido), status (vazio), observacao (quando houver). Extraia TODOS os itens listados, não resuma.
-
-5) VISITA TÉCNICA E PROPOSTA: visitaTecnica = true apenas se o edital exigir visita técnica obrigatória. Validade da proposta (prazo em dias ou texto).
-
-6) SESSÃO E OUTROS: Diferença entre lances, prazo para proposta ajustada, aberto/fechado. Mecanismo de pagamento quando citado.
-
-7) ANÁLISE: Pontuação 0-100 (valor do contrato, clareza, viabilidade, prazos) e recomendação curta."""
-
-# Canonical storage shape (v1-compat: flat values + evidence + requisitos). Used by single-call path and as merge target.
+# Canonical storage shape (v1-compat: flat values + evidence + requisitos). Used as merge target and for defaults.
 CHECKLIST_JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -732,35 +716,6 @@ def _generate_one_block(
     return data, raw
 
 
-def generate_checklist_blocks(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
-    """Generate checklist by running one LLM call per block and merging (full context). Returns (checklist dict, debug payload)."""
-    logger.info("Generating checklist by blocks: fileName=%s context_len=%d blocks=%d", file_name or "document", len(context), len(CHECKLIST_BLOCKS))
-    merged = {}
-    raw_by_block = {}
-    for block in CHECKLIST_BLOCKS:
-        name = block["key"]
-        try:
-            block_data, raw = _generate_one_block(openai_client, block, context, file_name)
-            raw_by_block[name] = {"parsed": block_data, "raw": raw}
-            flat, ev = _flatten_block_result(name, block_data)
-            if ev:
-                merged.setdefault("evidence", {})
-                _deep_merge_checklist(merged["evidence"], ev)
-            _deep_merge_checklist(merged, flat)
-        except Exception as e:
-            logger.warning("Block %s failed: %s", name, e)
-            raw_by_block[name] = {"parsed": {"_error": str(e)}, "raw": ""}
-    merged.setdefault("schemaVersion", 2)
-    _fill_checklist_defaults(merged)
-    openai_debug = {
-        "mode": "blocks",
-        "blocks": list(b["key"] for b in CHECKLIST_BLOCKS),
-        "raw_by_block": raw_by_block,
-    }
-    logger.info("Checklist blocks merged: fileName=%s", file_name or "document")
-    return merged, openai_debug
-
-
 def _fill_checklist_defaults(merged: dict) -> None:
     """Ensure all required top-level keys exist (in-place)."""
     default_edital = {
@@ -970,17 +925,6 @@ def update_document_status(conn, document_id: str, status: str):
     logger.info("Document status updated: documentId=%s status=%s", document_id, status)
 
 
-def update_document_vector_store(conn, document_id: str, vector_store_id: str):
-    """Store the OpenAI vector store ID on the document."""
-    logger.info("Updating document vectorStoreId: documentId=%s", document_id)
-    query = 'UPDATE "Document" SET "vectorStoreId" = %s WHERE id = %s'
-    params = (vector_store_id, document_id)
-    _log_query(query, params)
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-    conn.commit()
-
-
 def download_to_temp(file_url: str, file_name: str) -> str:
     """Download file from URL to a temporary file; return path. Caller must delete."""
     logger.info("Downloading file: fileName=%s url_len=%d", file_name or "document", len(file_url))
@@ -1182,161 +1126,7 @@ def parse_file_to_normalized_chunks(file_path: str, file_name: str) -> tuple[lis
     return all_chunks, debug_payload
 
 
-def parse_file(file_path: str, file_name: str) -> tuple[list[str], dict]:
-    """Parse PDF or CSV with open-source unstructured library; return (chunks, debug_payload)."""
-    logger.info("Parsing file: path=%s fileName=%s", file_path, file_name or "document")
-    elements = partition(filename=file_path, languages=PARTITION_LANGUAGES)
-    logger.info("Partition produced %d elements", len(elements))
-    chunks = []
-    elements_debug = []
-    for el in elements:
-        text = getattr(el, "text", None) or str(el)
-        elements_debug.append({"type": type(el).__name__, "text": text})
-        if text and text.strip():
-            chunks.append(text)
-    if not chunks:
-        try:
-            with open(file_path, "r", errors="replace") as f:
-                raw = f.read(50000)
-                if raw.strip():
-                    chunks = [raw]
-        except Exception:
-            pass
-        if not chunks:
-            chunks = ["(no text extracted)"]
-    logger.info("Parse complete: %d text chunks", len(chunks))
-    debug_payload = {"fileName": file_name or "document", "elementCount": len(elements), "elements": elements_debug, "chunks": chunks}
-    return chunks, debug_payload
-
-
-# Max characters per merged file to stay well under API token limits (~2M tokens per file).
-MAX_CHARS_PER_MERGED_FILE = 500_000
 CHUNK_SEP = "\n\n"
-
-
-def _merge_chunks_to_temp_files(
-    chunks: list[str], max_chars_per_file: int = MAX_CHARS_PER_MERGED_FILE
-) -> list[str]:
-    """Merge chunks into one or more temp text files. Returns list of temp file paths. Caller must delete."""
-    if not chunks:
-        return []
-    paths = []
-    current_parts = []
-    current_len = 0
-    try:
-        for text in chunks:
-            part = text.strip()
-            if not part:
-                continue
-            part_len = len(part) + len(CHUNK_SEP)
-            if current_parts and (current_len + part_len) > max_chars_per_file:
-                fd, path = tempfile.mkstemp(suffix=".txt")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(CHUNK_SEP.join(current_parts))
-                paths.append(path)
-                current_parts = []
-                current_len = 0
-            current_parts.append(part)
-            current_len += part_len
-        if current_parts:
-            fd, path = tempfile.mkstemp(suffix=".txt")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(CHUNK_SEP.join(current_parts))
-            paths.append(path)
-        return paths
-    except Exception:
-        for p in paths:
-            try:
-                os.unlink(p)
-            except Exception:
-                pass
-        raise
-
-
-def create_vector_store_and_upload_chunks(
-    openai_client: OpenAI, document_id: str, chunks: list[str]
-) -> str:
-    """Create an OpenAI vector store, upload merged document file(s), wait until ready. Returns vector_store_id."""
-    if not chunks:
-        raise ValueError("No chunks to upload")
-    merged_paths = _merge_chunks_to_temp_files(chunks)
-    num_files = len(merged_paths)
-    logger.info(
-        "Creating vector store for documentId=%s with %d chunks merged into %d file(s)",
-        document_id,
-        len(chunks),
-        num_files,
-    )
-    vs = openai_client.vector_stores.create(name=f"doc-{document_id}")
-    vector_store_id = vs.id
-    file_ids = []
-    try:
-        for path in merged_paths:
-            with open(path, "rb") as f:
-                file = openai_client.files.create(file=f, purpose="assistants")
-            file_ids.append(file.id)
-        if num_files == 1:
-            openai_client.vector_stores.files.create(
-                vector_store_id=vector_store_id, file_id=file_ids[0]
-            )
-        else:
-            openai_client.vector_stores.file_batches.create_and_poll(
-                vector_store_id=vector_store_id, file_ids=file_ids
-            )
-        _wait_for_vector_store_ready(openai_client, vector_store_id)
-        return vector_store_id
-    finally:
-        for p in merged_paths:
-            try:
-                os.unlink(p)
-            except Exception:
-                pass
-
-
-def _wait_for_vector_store_ready(openai_client: OpenAI, vector_store_id: str, max_wait_sec: int = 600):
-    """Poll vector store until status is completed or failed."""
-    start = time.monotonic()
-    while (time.monotonic() - start) < max_wait_sec:
-        vs = openai_client.vector_stores.retrieve(vector_store_id)
-        status = getattr(vs, "status", None)
-        counts = getattr(vs, "file_counts", None)
-        total = getattr(counts, "total", 0) if counts else 0
-        completed = getattr(counts, "completed", 0) if counts else 0
-        failed = getattr(counts, "failed", 0) if counts else 0
-        if status == "completed" or (total and total == completed):
-            logger.info("Vector store %s ready (completed=%d)", vector_store_id, completed)
-            return
-        if status == "expired" or failed:
-            raise RuntimeError(f"Vector store {vector_store_id} failed or expired: status={status}, file_counts={getattr(counts, '__dict__', counts)}")
-        logger.debug("Vector store %s status=%s completed=%d/%d", vector_store_id, status, completed, total)
-        time.sleep(2)
-    raise TimeoutError(f"Vector store {vector_store_id} did not complete within {max_wait_sec}s")
-
-
-def search_vector_store(
-    openai_client: OpenAI, vector_store_id: str, query: str, max_results: int = TOP_K
-) -> list[str]:
-    """Search the vector store with a natural language query. Returns list of chunk texts."""
-    logger.info("Searching vector store: vector_store_id=%s max_results=%d", vector_store_id, max_results)
-    resp = openai_client.vector_stores.search(
-        vector_store_id=vector_store_id,
-        query=query,
-        max_num_results=max_results,
-    )
-    texts = []
-    for item in getattr(resp, "data", []):
-        for content_block in getattr(item, "content", []):
-            if getattr(content_block, "type", None) == "text":
-                t = getattr(content_block, "text", None)
-                if t and t.strip():
-                    texts.append(t.strip())
-    logger.info("Vector store search returned %d chunks", len(texts))
-    return texts
-
-
-def build_full_document_context(chunks: list[str]) -> str:
-    """Build context string from all Unstructured elements (chunks); no truncation."""
-    return CHUNK_SEP.join(c.strip() for c in chunks if c and c.strip())
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -1466,43 +1256,6 @@ def _upload_pdf_to_openai(openai_client: OpenAI, pdf_path: str, file_name: str) 
     file_id = file_obj.id
     logger.info("PDF uploaded: file_id=%s", file_id)
     return file_id
-
-
-def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
-    """Call OpenAI Chat Completions with structured elements text; return (checklist dict, debug payload)."""
-    logger.info("Generating checklist: fileName=%s context_len=%d", file_name or "document", len(context))
-    user_content = f"Contexto do documento ({file_name}):\n\n{context}\n\nExtraia o checklist em JSON."
-    resp = openai_client.chat.completions.create(
-        model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": CHECKLIST_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "licitacao_checklist",
-                "strict": True,
-                "schema": CHECKLIST_JSON_SCHEMA,
-            },
-        },
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    data = json.loads(raw)
-    usage = getattr(resp, "usage", None)
-    openai_debug = {
-        "model": getattr(resp, "model", CHAT_MODEL),
-        "usage": {
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "total_tokens": getattr(usage, "total_tokens", None),
-        } if usage else None,
-        "user_content": user_content,
-        "raw_content": raw,
-        "parsed_checklist": data,
-    }
-    logger.info("Checklist generated: fileName=%s", file_name or "document")
-    return data, openai_debug
 
 
 def _extract_output_text_from_response(resp) -> str:
@@ -1696,39 +1449,17 @@ def process_job(payload: dict):
             finally:
                 conn.close()
         else:
+            # Text mode: retrieval-driven block extraction (normalized chunks → embeddings → one LLM call per block)
             conn = get_conn()
             try:
-                if USE_CHECKLIST_BLOCKS:
-                    # Retrieval-driven block extraction: normalized chunks → embeddings → one LLM call per block with block-specific context
-                    logger.info("Using retrieval-driven block extraction for documentId=%s", document_id)
-                    normalized_chunks, unstructured_debug = parse_file_to_normalized_chunks(temp_path, file_name)
-                    upload_debug_json(user_id, document_id, unstructured_debug)
-                    if not normalized_chunks:
-                        raise ValueError("No content extracted")
-                    checklist_data, checklist_openai_debug = generate_checklist_blocks_retrieval(
-                        openai_client, normalized_chunks, file_name
-                    )
-                else:
-                    # Legacy: full-document or vector-store context, single or multi-call
-                    logger.info("Parsing file for documentId=%s (legacy path)", document_id)
-                    chunks_text, unstructured_debug = parse_file(temp_path, file_name)
-                    upload_debug_json(user_id, document_id, unstructured_debug)
-                    if not chunks_text:
-                        raise ValueError("No content extracted")
-                    if USE_VECTOR_STORE:
-                        logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
-                        vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
-                        logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
-                        update_document_vector_store(conn, document_id, vector_store_id)
-                        logger.info("Searching vector store for checklist context: documentId=%s", document_id)
-                        relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
-                        context = "\n\n".join(relevant)
-                    else:
-                        logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
-                        context = build_full_document_context(chunks_text)
-                    checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
-                    checklist_data = normalize_checklist_result(checklist_data)
-
+                logger.info("Using retrieval-driven block extraction for documentId=%s", document_id)
+                normalized_chunks, unstructured_debug = parse_file_to_normalized_chunks(temp_path, file_name)
+                upload_debug_json(user_id, document_id, unstructured_debug)
+                if not normalized_chunks:
+                    raise ValueError("No content extracted")
+                checklist_data, checklist_openai_debug = generate_checklist_blocks_retrieval(
+                    openai_client, normalized_chunks, file_name
+                )
                 openai_debug = {"checklist": checklist_openai_debug}
                 upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
                 insert_checklist(conn, user_id, file_name, checklist_data, document_id, processed_with_pdf_mode=False)
