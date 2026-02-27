@@ -510,6 +510,10 @@ Extraia TODOS os itens listados. Retorne array vazio se não houver seção de d
                         "faseLances": {"type": "string"},
                         "prazoPosLance": {"type": "string"},
                     },
+                    "required": [
+                        "diferencaEntreLances", "horasPropostaAjustada", "abertoFechado",
+                        "criterioJulgamento", "tempoDisputa", "tempoRandomico", "faseLances", "prazoPosLance",
+                    ],
                     "additionalProperties": False,
                 },
             },
