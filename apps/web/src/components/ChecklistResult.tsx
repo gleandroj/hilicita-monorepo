@@ -33,9 +33,9 @@ export interface ChecklistData {
     itemEdital?: string;
   };
   prazos: {
-    enviarPropostaAte?: { data: string; horario: string };
-    esclarecimentosAte?: { data: string; horario: string };
-    impugnacaoAte?: { data: string; horario: string };
+    enviarPropostaAte?: { data?: string; horario?: string; raw?: string };
+    esclarecimentosAte?: { data?: string; horario?: string; raw?: string };
+    impugnacaoAte?: { data?: string; horario?: string; raw?: string };
     contatoEsclarecimentoImpugnacao?: string;
     /** Compat: texto único */
     proposta?: string;
@@ -61,8 +61,25 @@ export interface ChecklistData {
     diferencaEntreLances?: string;
     horasPropostaAjustada?: string;
     abertoFechado?: string;
+    criterioJulgamento?: string;
+    tempoDisputa?: string;
+    tempoRandomico?: string;
+    faseLances?: string;
+    prazoPosLance?: string;
   };
+  /** Schema v2: requisitos normalizados (worker também preenche documentos para compat) */
+  requisitos?: Array<{
+    categoria?: string;
+    referencia?: string;
+    local?: string;
+    descricao?: string;
+    obrigatorio?: boolean;
+    etapa?: string;
+    condicao?: string;
+  }>;
   outrosEdital?: { mecanismoPagamento?: string };
+  schemaVersion?: number;
+  evidence?: Record<string, unknown>;
   responsavelAnalise?: string;
   pontuacao?: number;
   recomendacao?: string;
@@ -73,9 +90,26 @@ interface ChecklistResultProps {
   fileName: string;
 }
 
-function formatPrazo(p: { data?: string; horario?: string } | string | undefined): string {
+function hasAnySessaoField(s: ChecklistData["sessao"]): boolean {
+  if (!s) return false;
+  return !!(
+    (s.diferencaEntreLances ?? "").trim() ||
+    (s.horasPropostaAjustada ?? "").trim() ||
+    (s.abertoFechado ?? "").trim() ||
+    (s.criterioJulgamento ?? "").trim() ||
+    (s.tempoDisputa ?? "").trim() ||
+    (s.tempoRandomico ?? "").trim() ||
+    (s.faseLances ?? "").trim() ||
+    (s.prazoPosLance ?? "").trim()
+  );
+}
+
+function formatPrazo(
+  p: { data?: string; horario?: string; raw?: string } | string | undefined
+): string {
   if (!p) return "";
   if (typeof p === "string") return p;
+  if (p.raw && p.raw.trim()) return p.raw.trim();
   const parts = [p.data, p.horario].filter(Boolean);
   return parts.join(" ");
 }
@@ -199,12 +233,35 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
             <p className="text-sm text-foreground mt-1">{data.proposta.validadeProposta}</p>
           </div>
         )}
-        {data.sessao && (data.sessao.diferencaEntreLances || data.sessao.horasPropostaAjustada || data.sessao.abertoFechado) && (
-          <div className="rounded-xl bg-card p-4 shadow-card border border-border space-y-1">
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Sessão</p>
-            {data.sessao.diferencaEntreLances && <p className="text-sm text-foreground">{data.sessao.diferencaEntreLances}</p>}
-            {data.sessao.horasPropostaAjustada && <p className="text-sm text-foreground">{data.sessao.horasPropostaAjustada}</p>}
-            {data.sessao.abertoFechado && <p className="text-sm text-foreground">{data.sessao.abertoFechado}</p>}
+        {data.sessao && hasAnySessaoField(data.sessao) && (
+          <div className="rounded-xl bg-card p-4 shadow-card border border-border space-y-3">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Sessão e disputa</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {data.sessao.diferencaEntreLances && (
+                <div><span className="text-xs text-muted-foreground">Diferença entre lances</span><p className="text-sm text-foreground">{data.sessao.diferencaEntreLances}</p></div>
+              )}
+              {data.sessao.horasPropostaAjustada && (
+                <div><span className="text-xs text-muted-foreground">Proposta ajustada</span><p className="text-sm text-foreground">{data.sessao.horasPropostaAjustada}</p></div>
+              )}
+              {data.sessao.abertoFechado && (
+                <div><span className="text-xs text-muted-foreground">Aberto/fechado</span><p className="text-sm text-foreground">{data.sessao.abertoFechado}</p></div>
+              )}
+              {data.sessao.criterioJulgamento && (
+                <div><span className="text-xs text-muted-foreground">Critério de julgamento</span><p className="text-sm text-foreground">{data.sessao.criterioJulgamento}</p></div>
+              )}
+              {data.sessao.tempoDisputa && (
+                <div><span className="text-xs text-muted-foreground">Tempo de disputa</span><p className="text-sm text-foreground">{data.sessao.tempoDisputa}</p></div>
+              )}
+              {data.sessao.tempoRandomico && (
+                <div><span className="text-xs text-muted-foreground">Tempo randômico</span><p className="text-sm text-foreground">{data.sessao.tempoRandomico}</p></div>
+              )}
+              {data.sessao.faseLances && (
+                <div><span className="text-xs text-muted-foreground">Fase de lances</span><p className="text-sm text-foreground">{data.sessao.faseLances}</p></div>
+              )}
+              {data.sessao.prazoPosLance && (
+                <div><span className="text-xs text-muted-foreground">Prazo pós-lance</span><p className="text-sm text-foreground">{data.sessao.prazoPosLance}</p></div>
+              )}
+            </div>
           </div>
         )}
         {data.outrosEdital?.mecanismoPagamento && (
