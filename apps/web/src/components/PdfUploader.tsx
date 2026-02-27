@@ -4,13 +4,14 @@ import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface PdfUploaderProps {
-  onExtract: (file: File) => void;
+  onExtract: (file: File, options?: { usePdfFile?: boolean }) => void;
   isProcessing: boolean;
 }
 
 const PdfUploader = ({ onExtract, isProcessing }: PdfUploaderProps) => {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [usePdfFile, setUsePdfFile] = useState(false);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -30,7 +31,7 @@ const PdfUploader = ({ onExtract, isProcessing }: PdfUploaderProps) => {
 
   const handleExtract = () => {
     if (!file) return;
-    onExtract(file);
+    onExtract(file, { usePdfFile });
   };
 
   return (
@@ -103,7 +104,16 @@ const PdfUploader = ({ onExtract, isProcessing }: PdfUploaderProps) => {
       </div>
 
       {file && (
-        <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }}>
+        <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} className="space-y-3">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={usePdfFile}
+              onChange={(e) => setUsePdfFile(e.target.checked)}
+              className="rounded border-border"
+            />
+            Enviar PDF como arquivo (pode dar melhor resultado que texto extraído)
+          </label>
           <Button
             onClick={handleExtract}
             disabled={isProcessing}

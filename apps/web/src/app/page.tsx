@@ -24,12 +24,15 @@ function HomeContent() {
   const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
 
-  const handleExtract = async (file: File) => {
+  const handleExtract = async (file: File, options?: { usePdfFile?: boolean }) => {
     setIsProcessing(true);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
+      if (options?.usePdfFile) {
+        formData.append("usePdfFile", "true");
+      }
 
       const uploadRes = await fetch(`${API_URL}/documents/upload`, {
         method: "POST",

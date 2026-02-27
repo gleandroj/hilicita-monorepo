@@ -45,6 +45,10 @@ TOP_K = 10
 # When False, checklist uses full document text in the prompt; vector store is skipped (can re-enable later).
 USE_VECTOR_STORE = False
 
+# When True, send the PDF as file to OpenAI (Responses API input_file) instead of parsed structured elements.
+# Can be overridden per job via payload "usePdfFile". Requires vision-capable model (e.g. gpt-4o, gpt-4o-mini).
+USE_PDF_AS_FILE = os.environ.get("USE_PDF_AS_FILE", "false").lower() in ("true", "1")
+
 CHECKLIST_SYSTEM_PROMPT = """Você é um especialista em licitações brasileiras. Seu trabalho é preencher um checklist estruturado com base no documento do edital, seguindo o modelo padrão de checklist de licitação.
 
 Com base no contexto fornecido (conteúdo do documento), extraia todas as informações nos campos indicados. Use string vazia quando não encontrar a informação e false para campos booleanos quando não aplicável.
@@ -438,8 +442,18 @@ def build_full_document_context(chunks: list[str]) -> str:
     return CHUNK_SEP.join(c.strip() for c in chunks if c and c.strip())
 
 
+def _upload_pdf_to_openai(openai_client: OpenAI, pdf_path: str, file_name: str) -> str:
+    """Upload PDF to OpenAI Files API (purpose=user_data) for use as input_file. Returns file_id."""
+    logger.info("Uploading PDF to OpenAI Files API: path=%s fileName=%s", pdf_path, file_name or "document")
+    with open(pdf_path, "rb") as f:
+        file_obj = openai_client.files.create(file=f, purpose="user_data")
+    file_id = file_obj.id
+    logger.info("PDF uploaded: file_id=%s", file_id)
+    return file_id
+
+
 def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> tuple[dict, dict]:
-    """Call OpenAI with Structured Outputs; return (checklist dict, debug payload)."""
+    """Call OpenAI Chat Completions with structured elements text; return (checklist dict, debug payload)."""
     logger.info("Generating checklist: fileName=%s context_len=%d", file_name or "document", len(context))
     user_content = f"Contexto do documento ({file_name}):\n\n{context}\n\nExtraia o checklist em JSON."
     resp = openai_client.chat.completions.create(
@@ -472,6 +486,70 @@ def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> t
         "parsed_checklist": data,
     }
     logger.info("Checklist generated: fileName=%s", file_name or "document")
+    return data, openai_debug
+
+
+def generate_checklist_from_pdf_file(
+    openai_client: OpenAI, pdf_path: str, file_name: str
+) -> tuple[dict, dict]:
+    """Send PDF as file to OpenAI Responses API (input_file via file_id) and get checklist via structured output."""
+    logger.info("Generating checklist from PDF file: fileName=%s path=%s", file_name or "document", pdf_path)
+    file_id = _upload_pdf_to_openai(openai_client, pdf_path, file_name or "document.pdf")
+    user_instruction = (
+        "Com base no documento (edital de licitação) anexado, extraia todas as informações no checklist em JSON conforme o schema."
+    )
+    input_content = [
+        {"type": "input_file", "file_id": file_id},
+        {"type": "input_text", "text": user_instruction},
+    ]
+    try:
+        resp = openai_client.responses.create(
+            model=CHAT_MODEL,
+            instructions=CHECKLIST_SYSTEM_PROMPT,
+            input=[{"role": "user", "content": input_content}],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "licitacao_checklist",
+                    "strict": True,
+                    "schema": CHECKLIST_JSON_SCHEMA,
+                }
+            },
+        )
+    except Exception as e:
+        if "input_file" in str(e).lower() or "file" in str(e).lower():
+            logger.warning(
+                "Responses API with input_file may require a vision model (e.g. gpt-4o). Falling back to chat completions. Error: %s",
+                e,
+            )
+        raise
+    raw = (getattr(resp, "output_text", None) or "").strip()
+    if not raw:
+        for item in getattr(resp, "output", []) or []:
+            if getattr(item, "type", None) == "message":
+                for content in getattr(item, "content", []) or []:
+                    if getattr(content, "type", None) == "output_text":
+                        raw = (getattr(content, "text", None) or "").strip()
+                        break
+            if raw:
+                break
+    if not raw:
+        raise ValueError("No output_text in Responses API response")
+    data = json.loads(raw)
+    usage = getattr(resp, "usage", None)
+    openai_debug = {
+        "mode": "pdf_file",
+        "model": getattr(resp, "model", CHAT_MODEL),
+        "usage": {
+            "prompt_tokens": getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        } if usage else None,
+        "user_instruction": user_instruction,
+        "raw_content": raw,
+        "parsed_checklist": data,
+    }
+    logger.info("Checklist generated from PDF file: fileName=%s", file_name or "document")
     return data, openai_debug
 
 
@@ -518,11 +596,13 @@ def process_job(payload: dict):
     user_id = payload.get("userId")
     file_url = payload.get("fileUrl")
     file_name = payload.get("fileName", "document")
+    use_pdf_file = payload.get("usePdfFile", USE_PDF_AS_FILE)
     logger.info(
-        "Processing job: documentId=%s userId=%s fileName=%s",
+        "Processing job: documentId=%s userId=%s fileName=%s usePdfFile=%s",
         document_id,
         user_id,
         file_name,
+        use_pdf_file,
     )
     if not document_id or not user_id or not file_url:
         logger.error("Missing documentId, userId or fileUrl in job payload=%s", payload)
@@ -537,40 +617,59 @@ def process_job(payload: dict):
     try:
         logger.info("Downloading file for documentId=%s", document_id)
         temp_path = download_to_temp(file_url, file_name)
-        logger.info("Parsing file for documentId=%s", document_id)
-        chunks_text, unstructured_debug = parse_file(temp_path, file_name)
-        upload_debug_json(user_id, document_id, unstructured_debug)
-        if not chunks_text:
-            raise ValueError("No content extracted")
+
         openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
         if not openai_client:
             raise RuntimeError("OPENAI_API_KEY is not set")
-        conn = get_conn()
-        try:
-            if USE_VECTOR_STORE:
-                logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
-                vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
-                logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
-                update_document_vector_store(conn, document_id, vector_store_id)
-                logger.info("Searching vector store for checklist context: documentId=%s", document_id)
-                relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
-                context = "\n\n".join(relevant)
-            else:
-                # Use all Unstructured elements in the prompt (no vector store)
-                logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
-                context = build_full_document_context(chunks_text)
 
-            checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
+        if use_pdf_file:
+            logger.info("Using PDF-as-file mode for documentId=%s", document_id)
+            upload_debug_json(user_id, document_id, {"mode": "pdf_file", "fileName": file_name}, "unstructured-debug")
+            checklist_data, checklist_openai_debug = generate_checklist_from_pdf_file(
+                openai_client, temp_path, file_name
+            )
             openai_debug = {"checklist": checklist_openai_debug}
             upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
-            insert_checklist(conn, user_id, file_name, checklist_data, document_id)
-            logger.info("Document %s: checklist generated and inserted", document_id)
+            conn = get_conn()
+            try:
+                insert_checklist(conn, user_id, file_name, checklist_data, document_id)
+            finally:
+                conn.close()
+        else:
+            logger.info("Parsing file for documentId=%s", document_id)
+            chunks_text, unstructured_debug = parse_file(temp_path, file_name)
+            upload_debug_json(user_id, document_id, unstructured_debug)
+            if not chunks_text:
+                raise ValueError("No content extracted")
+            conn = get_conn()
+            try:
+                if USE_VECTOR_STORE:
+                    logger.info("Creating OpenAI vector store and uploading %d chunks for documentId=%s", len(chunks_text), document_id)
+                    vector_store_id = create_vector_store_and_upload_chunks(openai_client, document_id, chunks_text)
+                    logger.info("Document %s: vector store %s ready", document_id, vector_store_id)
+                    update_document_vector_store(conn, document_id, vector_store_id)
+                    logger.info("Searching vector store for checklist context: documentId=%s", document_id)
+                    relevant = search_vector_store(openai_client, vector_store_id, CHECKLIST_QUERY)
+                    context = "\n\n".join(relevant)
+                else:
+                    logger.info("Using full document (%d chunks) for checklist: documentId=%s", len(chunks_text), document_id)
+                    context = build_full_document_context(chunks_text)
 
+                checklist_data, checklist_openai_debug = generate_checklist(openai_client, context, file_name)
+                openai_debug = {"checklist": checklist_openai_debug}
+                upload_debug_json(user_id, document_id, openai_debug, "openai-debug")
+                insert_checklist(conn, user_id, file_name, checklist_data, document_id)
+            finally:
+                conn.close()
+
+        logger.info("Document %s: checklist generated and inserted", document_id)
+        conn = get_conn()
+        try:
             logger.info("Setting documentId=%s status=done", document_id)
             update_document_status(conn, document_id, "done")
-            logger.info("Job completed successfully: documentId=%s", document_id)
         finally:
             conn.close()
+        logger.info("Job completed successfully: documentId=%s", document_id)
     except Exception as e:
         logger.exception("Job failed for %s: %s", document_id, e)
         logger.info("Setting documentId=%s status=failed", document_id)

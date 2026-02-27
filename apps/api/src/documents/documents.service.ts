@@ -22,6 +22,7 @@ export class DocumentsService {
   async createAndEnqueue(
     userId: string,
     file: { buffer: Buffer; originalname?: string; mimetype: string },
+    options?: { usePdfFile?: boolean },
   ): Promise<{ documentId: string; status: string }> {
     this.logger.log(
       `createAndEnqueue started for userId=${userId} fileName=${file.originalname ?? 'document'}`,
@@ -66,6 +67,7 @@ export class DocumentsService {
       userId,
       fileUrl,
       fileName: file.originalname ?? 'document',
+      ...(options?.usePdfFile !== undefined && { usePdfFile: options.usePdfFile }),
     };
     this.logger.log(
       `Pushing job to queue ${DOCUMENT_INGEST_QUEUE} documentId=${documentId}`,

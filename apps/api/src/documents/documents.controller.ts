@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   Logger,
@@ -24,6 +25,7 @@ export class DocumentsController {
     @UploadedFile()
     file: { buffer: Buffer; originalname?: string; mimetype: string },
     @Auth.Session() session: Auth.UserSession,
+    @Body('usePdfFile') usePdfFile?: string,
   ) {
     this.logger.log('Upload request received');
     if (!session?.user?.id) {
@@ -53,6 +55,7 @@ export class DocumentsController {
     const result = await this.documentsService.createAndEnqueue(
       session.user.id,
       file,
+      { usePdfFile: usePdfFile === 'true' || usePdfFile === '1' },
     );
     this.logger.log(
       `Upload completed: documentId=${result.documentId} status=${result.status}`,
