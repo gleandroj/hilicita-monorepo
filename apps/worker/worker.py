@@ -1244,40 +1244,8 @@ def generate_checklist(openai_client: OpenAI, context: str, file_name: str) -> t
     return data, openai_debug
 
 
-def generate_checklist_from_pdf_file(
-    openai_client: OpenAI, pdf_path: str, file_name: str
-) -> tuple[dict, dict]:
-    """Send PDF as file to OpenAI Responses API (input_file via file_id) and get checklist via structured output."""
-    logger.info("Generating checklist from PDF file: fileName=%s path=%s", file_name or "document", pdf_path)
-    file_id = _upload_pdf_to_openai(openai_client, pdf_path, file_name or "document.pdf")
-    user_instruction = (
-        "Com base no documento (edital de licitação) anexado, extraia todas as informações no checklist em JSON conforme o schema."
-    )
-    input_content = [
-        {"type": "input_file", "file_id": file_id},
-        {"type": "input_text", "text": user_instruction},
-    ]
-    try:
-        resp = openai_client.responses.create(
-            model=CHAT_MODEL,
-            instructions=CHECKLIST_SYSTEM_PROMPT,
-            input=[{"role": "user", "content": input_content}],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "licitacao_checklist",
-                    "strict": True,
-                    "schema": CHECKLIST_JSON_SCHEMA,
-                }
-            },
-        )
-    except Exception as e:
-        if "input_file" in str(e).lower() or "file" in str(e).lower():
-            logger.warning(
-                "Responses API with input_file may require a vision model (e.g. gpt-4o). Falling back to chat completions. Error: %s",
-                e,
-            )
-        raise
+def _extract_output_text_from_response(resp) -> str:
+    """Extract output_text from OpenAI Responses API response."""
     raw = (getattr(resp, "output_text", None) or "").strip()
     if not raw:
         for item in getattr(resp, "output", []) or []:
@@ -1288,24 +1256,92 @@ def generate_checklist_from_pdf_file(
                         break
             if raw:
                 break
+    return raw
+
+
+def _generate_one_block_from_pdf_file(
+    openai_client: OpenAI, file_id: str, block: dict, file_name: str
+) -> tuple[dict, str, object]:
+    """One Responses API call with PDF file_id and block-specific schema/instructions. Returns (block result dict, raw JSON string, response)."""
+    name = block["key"]
+    schema = block["schema"]
+    system = block["system_prompt"]
+    user_instruction = (
+        f"Com base no documento (edital de licitação) anexado, extraia APENAS a parte do checklist correspondente a este bloco. "
+        f"Retorne em JSON estrito conforme o schema. Documento: {file_name or 'document'}."
+    )
+    input_content = [
+        {"type": "input_file", "file_id": file_id},
+        {"type": "input_text", "text": user_instruction},
+    ]
+    resp = openai_client.responses.create(
+        model=CHAT_MODEL,
+        instructions=system,
+        input=[{"role": "user", "content": input_content}],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": f"checklist_block_{name}",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+    raw = _extract_output_text_from_response(resp)
     if not raw:
-        raise ValueError("No output_text in Responses API response")
+        raise ValueError(f"No output_text in Responses API response for block {name}")
     data = json.loads(raw)
-    usage = getattr(resp, "usage", None)
+    return data, raw, resp
+
+
+def generate_checklist_from_pdf_file(
+    openai_client: OpenAI, pdf_path: str, file_name: str
+) -> tuple[dict, dict]:
+    """Send PDF as file to OpenAI Responses API; one call per CHECKLIST_BLOCK, then merge. Returns (checklist dict, debug payload)."""
+    logger.info(
+        "Generating checklist from PDF file (blocks): fileName=%s path=%s blocks=%d",
+        file_name or "document", pdf_path, len(CHECKLIST_BLOCKS),
+    )
+    file_id = _upload_pdf_to_openai(openai_client, pdf_path, file_name or "document.pdf")
+    merged = {}
+    raw_by_block = {}
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    last_model = CHAT_MODEL
+    for block in CHECKLIST_BLOCKS:
+        name = block["key"]
+        try:
+            block_data, raw, resp = _generate_one_block_from_pdf_file(openai_client, file_id, block, file_name)
+            raw_by_block[name] = block_data
+            if name == "modalidade_participacao":
+                merged["modalidadeLicitacao"] = block_data.get("modalidadeLicitacao", "")
+                merged["participacao"] = block_data.get("participacao") or {}
+            else:
+                _deep_merge_checklist(merged, block_data)
+            usage = getattr(resp, "usage", None)
+            if usage:
+                total_usage["prompt_tokens"] += getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
+                total_usage["completion_tokens"] += getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
+                total_usage["total_tokens"] += getattr(usage, "total_tokens", None) or 0
+            last_model = getattr(resp, "model", last_model)
+        except Exception as e:
+            if "input_file" in str(e).lower() or "file" in str(e).lower():
+                logger.warning(
+                    "Responses API with input_file may require a vision model (e.g. gpt-4o). Block %s failed: %s",
+                    name, e,
+                )
+            logger.warning("Block %s failed (PDF file): %s", name, e)
+            raw_by_block[name] = {"_error": str(e)}
+    _fill_checklist_defaults(merged)
+    merged = normalize_checklist_result(merged)
     openai_debug = {
-        "mode": "pdf_file",
-        "model": getattr(resp, "model", CHAT_MODEL),
-        "usage": {
-            "prompt_tokens": getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None),
-            "total_tokens": getattr(usage, "total_tokens", None),
-        } if usage else None,
-        "user_instruction": user_instruction,
-        "raw_content": raw,
-        "parsed_checklist": data,
+        "mode": "pdf_file_blocks",
+        "model": last_model,
+        "usage": total_usage if total_usage["total_tokens"] else None,
+        "blocks": [b["key"] for b in CHECKLIST_BLOCKS],
+        "raw_by_block": raw_by_block,
     }
-    logger.info("Checklist generated from PDF file: fileName=%s", file_name or "document")
-    return data, openai_debug
+    logger.info("Checklist generated from PDF file (blocks): fileName=%s", file_name or "document")
+    return merged, openai_debug
 
 
 def insert_checklist(
