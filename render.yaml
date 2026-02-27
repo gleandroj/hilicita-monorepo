@@ -45,6 +45,8 @@ services:
     buildCommand: npm install && cd apps/api && npx prisma generate && cd ../.. && npx turbo run build --filter=api
     startCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma migrate deploy && node dist/main
     healthCheckPath: /
+    domains:
+      - api.hilicita.com
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -94,6 +96,8 @@ services:
     plan: free
     buildCommand: npm install && npx turbo run build --filter=web
     startCommand: cd apps/web && npm run start
+    domains:
+      - hilicita.com
     envVars:
       - key: BETTER_AUTH_URL
         sync: false
