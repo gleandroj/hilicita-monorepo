@@ -114,6 +114,28 @@ function formatPrazo(
   return parts.join(" ");
 }
 
+/** Remove JSON/evidence fragments that sometimes end up in mecanismoPagamento from the LLM. */
+function sanitizeMecanismoPagamento(value: unknown, maxLen = 600): string {
+  if (value == null) return "";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.mecanismoPagamento === "string") return sanitizeMecanismoPagamento(obj.mecanismoPagamento, maxLen);
+    if (typeof obj.trecho === "string") return obj.trecho.slice(0, maxLen).trim();
+    return "";
+  }
+  let s = String(value).trim();
+  if (!s) return "";
+  // Strip content that looks like embedded JSON/evidence (e.g. ', 'evidencia":{"trecho":"...')
+  const evidenciaIdx = s.search(/\s*[,'"]\s*evidencia\s*[:{]/i);
+  if (evidenciaIdx > 5) s = s.slice(0, evidenciaIdx);
+  const trechoIdx = s.search(/\s*["']?\s*trecho\s*["']?\s*:/i);
+  if (trechoIdx > 5) s = s.slice(0, trechoIdx);
+  // Remove trailing JSON/backtick garbage (e.g. }}}'```)
+  s = s.replace(/\s*[}'`]+(?:\s*[}'`]+)*\s*$/g, "").trim();
+  if (s.length > maxLen) s = s.slice(0, maxLen).trim() + "…";
+  return s;
+}
+
 const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
   const scoreColor = (data.pontuacao ?? 0) >= 70 ? "text-success" : (data.pontuacao ?? 0) >= 40 ? "text-warning" : "text-destructive";
   const ed = data.edital;
@@ -264,12 +286,15 @@ const ChecklistResult = ({ data, fileName }: ChecklistResultProps) => {
             </div>
           </div>
         )}
-        {data.outrosEdital?.mecanismoPagamento && (
-          <div className="rounded-xl bg-card p-4 shadow-card border border-border">
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mecanismo de Pagamento</p>
-            <p className="text-sm text-foreground mt-1">{data.outrosEdital.mecanismoPagamento}</p>
-          </div>
-        )}
+        {(() => {
+          const payment = sanitizeMecanismoPagamento(data.outrosEdital?.mecanismoPagamento ?? data.outrosEdital);
+          return payment ? (
+            <div className="rounded-xl bg-card p-4 shadow-card border border-border">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mecanismo de Pagamento</p>
+              <p className="text-sm text-foreground mt-1 whitespace-pre-wrap break-words">{payment}</p>
+            </div>
+          ) : null;
+        })()}
       </div>
 
       {/* Document Checklist */}
