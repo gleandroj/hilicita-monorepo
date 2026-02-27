@@ -25,7 +25,7 @@ services:
     runtime: image
     image:
       url: docker.io/minio/minio:latest
-    dockerCommand: 'sh -c "/usr/bin/docker-entrypoint.sh server /data --address 0.0.0.0:$PORT --console-address 0.0.0.0:9000"'
+    dockerCommand: /usr/bin/docker-entrypoint.sh server /data --address 0.0.0.0:$PORT --console-address 0.0.0.0:9000
     envVars:
       - key: MINIO_ROOT_USER
         sync: false
