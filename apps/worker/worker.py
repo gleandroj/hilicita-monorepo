@@ -925,6 +925,34 @@ def update_document_status(conn, document_id: str, status: str):
     logger.info("Document status updated: documentId=%s status=%s", document_id, status)
 
 
+def ensure_document_status_failed(document_id: str, max_attempts: int = 3) -> None:
+    """On job failure, ensure document status is set to 'failed'. Retries on DB errors so the
+    document is not left stuck in 'processing' (e.g. after ONNX/Unstructured or other errors)."""
+    for attempt in range(max_attempts):
+        conn = None
+        try:
+            conn = get_conn()
+            update_document_status(conn, document_id, "failed")
+            return
+        except Exception as e:
+            logger.exception(
+                "Failed to set documentId=%s status=failed (attempt %d/%d): %s",
+                document_id,
+                attempt + 1,
+                max_attempts,
+                e,
+            )
+            if attempt < max_attempts - 1:
+                time.sleep(1.0 * (attempt + 1))
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    logger.error("Could not update documentId=%s to status=failed after %d attempts", document_id, max_attempts)
+
+
 def download_to_temp(file_url: str, file_name: str) -> str:
     """Download file from URL to a temporary file; return path. Caller must delete."""
     logger.info("Downloading file: fileName=%s url_len=%d", file_name or "document", len(file_url))
@@ -1477,11 +1505,7 @@ def process_job(payload: dict):
     except Exception as e:
         logger.exception("Job failed for %s: %s", document_id, e)
         logger.info("Setting documentId=%s status=failed", document_id)
-        conn = get_conn()
-        try:
-            update_document_status(conn, document_id, "failed")
-        finally:
-            conn.close()
+        ensure_document_status_failed(document_id)
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
