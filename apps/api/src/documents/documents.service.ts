@@ -105,4 +105,26 @@ export class DocumentsService {
       processedWithPdfMode: checklist.processedWithPdfMode ?? undefined,
     };
   }
+
+  async findAll(userId: string) {
+    return this.prisma.document.findMany({
+      where: { userId },
+      orderBy: { created_at: 'desc' },
+      select: { id: true, file_name: true, status: true, created_at: true },
+    });
+  }
+
+  async delete(documentId: string, userId: string) {
+    const doc = await this.prisma.document.findFirst({
+      where: { id: documentId, userId },
+    });
+    if (!doc) throw new NotFoundException('Document not found');
+    if (doc.status !== 'failed' && doc.status !== 'done') {
+      throw new BadRequestException(
+        'Only documents with status "failed" or "done" can be deleted.',
+      );
+    }
+    await this.prisma.document.delete({ where: { id: documentId } });
+    return { ok: true };
+  }
 }

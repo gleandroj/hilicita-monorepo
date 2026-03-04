@@ -8,7 +8,7 @@ import Header from "@/components/Header";
 import { type ChecklistData } from "@/components/ChecklistResult";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { motion } from "framer-motion";
-import { Calendar, Building2, DollarSign, Eye, Trash2, FileText, Search, SlidersHorizontal, X } from "lucide-react";
+import { Calendar, Building2, DollarSign, Eye, Trash2, FileText, Search, SlidersHorizontal, X, Loader2, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -28,11 +28,24 @@ interface SavedChecklist {
   objeto: string | null;
   valor_total: string | null;
   processedWithPdfMode?: boolean | null;
+  documentId?: string | null;
   created_at: string;
 }
 
+interface DocumentItem {
+  id: string;
+  file_name: string;
+  status: string;
+  created_at: string;
+}
+
+type HistoryItem =
+  | { type: "checklist"; checklist: SavedChecklist }
+  | { type: "document"; document: DocumentItem };
+
 function HistoryContent() {
   const [checklists, setChecklists] = useState<SavedChecklist[]>([]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [scoreFilter, setScoreFilter] = useState<string>("all");
@@ -41,25 +54,48 @@ function HistoryContent() {
   const { user } = useAuth();
   const { toast } = useToast();
 
+  const historyItems = useMemo((): HistoryItem[] => {
+    const doneDocumentIds = new Set(checklists.map((c) => c.documentId).filter(Boolean));
+    const nonDoneDocs = documents.filter((d) => d.status !== "done" && !doneDocumentIds.has(d.id));
+    const list: HistoryItem[] = [
+      ...checklists.map((c) => ({ type: "checklist" as const, checklist: c })),
+      ...nonDoneDocs.map((d) => ({ type: "document" as const, document: d })),
+    ];
+    list.sort((a, b) => {
+      const dateA = a.type === "checklist" ? a.checklist.created_at : a.document.created_at;
+      const dateB = b.type === "checklist" ? b.checklist.created_at : b.document.created_at;
+      return new Date(dateB).getTime() - new Date(dateA).getTime();
+    });
+    return list;
+  }, [checklists, documents]);
+
   const filtered = useMemo(() => {
-    return checklists.filter((c) => {
+    return historyItems.filter((item) => {
+      const file_name = item.type === "checklist" ? item.checklist.file_name : item.document.file_name;
+      const orgao = item.type === "checklist" ? item.checklist.orgao : null;
+      const objeto = item.type === "checklist" ? item.checklist.objeto : null;
+      const pontuacao = item.type === "checklist" ? item.checklist.pontuacao : null;
+      const created_at = item.type === "checklist" ? item.checklist.created_at : item.document.created_at;
+
       const term = searchTerm.toLowerCase();
       const matchesSearch =
         !term ||
-        c.file_name.toLowerCase().includes(term) ||
-        c.orgao?.toLowerCase().includes(term) ||
-        c.objeto?.toLowerCase().includes(term);
+        file_name.toLowerCase().includes(term) ||
+        orgao?.toLowerCase().includes(term) ||
+        objeto?.toLowerCase().includes(term);
       const matchesScore =
         scoreFilter === "all" ||
-        (scoreFilter === "high" && (c.pontuacao ?? 0) >= 70) ||
-        (scoreFilter === "medium" && (c.pontuacao ?? 0) >= 40 && (c.pontuacao ?? 0) < 70) ||
-        (scoreFilter === "low" && (c.pontuacao ?? 0) < 40);
-      const createdAt = new Date(c.created_at);
+        item.type === "document" ||
+        (item.type === "checklist" &&
+          ((scoreFilter === "high" && (pontuacao ?? 0) >= 70) ||
+            (scoreFilter === "medium" && (pontuacao ?? 0) >= 40 && (pontuacao ?? 0) < 70) ||
+            (scoreFilter === "low" && (pontuacao ?? 0) < 40)));
+      const createdAt = new Date(created_at);
       const matchesDateFrom = !dateFrom || !isBefore(createdAt, startOfDay(dateFrom));
       const matchesDateTo = !dateTo || !isAfter(createdAt, endOfDay(dateTo));
       return matchesSearch && matchesScore && matchesDateFrom && matchesDateTo;
     });
-  }, [checklists, searchTerm, scoreFilter, dateFrom, dateTo]);
+  }, [historyItems, searchTerm, scoreFilter, dateFrom, dateTo]);
 
   const hasActiveFilters = searchTerm || scoreFilter !== "all" || dateFrom || dateTo;
 
@@ -70,22 +106,59 @@ function HistoryContent() {
     setDateTo(undefined);
   };
 
+  const loadData = () => {
+    if (!user) return;
+    Promise.all([
+      apiFetch<SavedChecklist[]>("/checklists"),
+      apiFetch<DocumentItem[]>("/documents"),
+    ])
+      .then(([checklistData, documentData]) => {
+        setChecklists(Array.isArray(checklistData) ? checklistData : []);
+        setDocuments(Array.isArray(documentData) ? documentData : []);
+      })
+      .catch(() => {
+        setChecklists([]);
+        setDocuments([]);
+      })
+      .finally(() => setLoading(false));
+  };
+
   useEffect(() => {
-    if (user) {
-      apiFetch<SavedChecklist[]>("/checklists")
-        .then((data) => setChecklists(Array.isArray(data) ? data : []))
-        .catch(() => setChecklists([]))
-        .finally(() => setLoading(false));
-    }
+    if (user) loadData();
   }, [user]);
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const canDelete = (item: HistoryItem): boolean => {
+    if (item.type === "checklist") return true;
+    return item.document.status === "failed";
+  };
+
+  const getDeleteTarget = (item: HistoryItem): { type: "checklist" | "document"; id: string } | null => {
+    if (item.type === "checklist") {
+      if (item.checklist.documentId) return { type: "document", id: item.checklist.documentId };
+      return { type: "checklist", id: item.checklist.id };
+    }
+    if (item.document.status === "failed") return { type: "document", id: item.document.id };
+    return null;
+  };
+
+  const handleDelete = async (e: React.MouseEvent, item: HistoryItem) => {
     e.preventDefault();
     e.stopPropagation();
+    const target = getDeleteTarget(item);
+    if (!target) return;
     try {
-      await apiDelete(`/checklists/${id}`);
-      setChecklists((prev) => prev.filter((c) => c.id !== id));
-      toast({ title: "Checklist excluído" });
+      if (target.type === "document") {
+        await apiDelete(`/documents/${target.id}`);
+      } else {
+        await apiDelete(`/checklists/${target.id}`);
+      }
+      if (item.type === "checklist") {
+        setChecklists((prev) => prev.filter((c) => c.id !== item.checklist.id));
+      } else {
+        setDocuments((prev) => prev.filter((d) => d.id !== item.document.id));
+      }
+      toast({ title: "Excluído com sucesso" });
+      loadData();
     } catch (err) {
       toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Erro", variant: "destructive" });
     }
@@ -99,7 +172,7 @@ function HistoryContent() {
           <div>
             <h2 className="font-display text-3xl font-bold text-foreground">Histórico</h2>
             <p className="text-sm text-muted-foreground">
-              {filtered.length} de {checklists.length} {checklists.length === 1 ? "checklist" : "checklists"}
+              {filtered.length} de {historyItems.length} documento(s)
             </p>
           </div>
 
@@ -162,10 +235,10 @@ function HistoryContent() {
                 <div key={i} className="h-24 rounded-xl bg-muted/50 animate-pulse" />
               ))}
             </div>
-          ) : checklists.length === 0 ? (
+          ) : historyItems.length === 0 ? (
             <div className="text-center py-16 space-y-3">
               <FileText className="h-12 w-12 mx-auto text-muted-foreground/50" />
-              <p className="text-muted-foreground">Nenhum checklist salvo ainda.</p>
+              <p className="text-muted-foreground">Nenhum documento ainda.</p>
               <Button asChild>
                 <Link href="/">Extrair primeiro edital</Link>
               </Button>
@@ -178,67 +251,110 @@ function HistoryContent() {
             </div>
           ) : (
             <div className="space-y-3">
-              {filtered.map((checklist, i) => (
-                <motion.div
-                  key={checklist.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.05 }}
-                  className="rounded-xl bg-card p-5 shadow-card border border-border hover:border-primary/30 transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <Link href={`/historico/${checklist.id}`} className="min-w-0 flex-1 space-y-2 block">
-                      <p className="font-display font-semibold text-foreground truncate">{checklist.file_name}</p>
-                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                        {checklist.orgao && (
-                          <span className="flex items-center gap-1">
-                            <Building2 className="h-3 w-3" /> {checklist.orgao}
-                          </span>
-                        )}
-                        {checklist.valor_total && (
-                          <span className="flex items-center gap-1">
-                            <DollarSign className="h-3 w-3" /> {checklist.valor_total}
-                          </span>
-                        )}
-                        <span className="flex items-center gap-1">
-                          <Calendar className="h-3 w-3" />
-                          {format(new Date(checklist.created_at), "dd MMM yyyy, HH:mm", { locale: ptBR })}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 mt-1">
-                        {checklist.pontuacao !== null && (
-                          <span
-                            className={cn(
-                              "inline-block text-xs font-semibold px-2 py-0.5 rounded-full",
-                              checklist.pontuacao >= 70 && "bg-success/10 text-success",
-                              checklist.pontuacao >= 40 && checklist.pontuacao < 70 && "bg-warning/10 text-warning",
-                              checklist.pontuacao < 40 && "bg-destructive/10 text-destructive"
+              {filtered.map((item, i) => {
+                const key = item.type === "checklist" ? `c-${item.checklist.id}` : `d-${item.document.id}`;
+                const file_name = item.type === "checklist" ? item.checklist.file_name : item.document.file_name;
+                const created_at = item.type === "checklist" ? item.checklist.created_at : item.document.created_at;
+                const isChecklist = item.type === "checklist";
+                const showDelete = canDelete(item);
+
+                return (
+                  <motion.div
+                    key={key}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.05 }}
+                    className="rounded-xl bg-card p-5 shadow-card border border-border hover:border-primary/30 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      {isChecklist ? (
+                        <Link href={`/historico/${item.checklist.id}`} className="min-w-0 flex-1 space-y-2 block">
+                          <p className="font-display font-semibold text-foreground truncate">{file_name}</p>
+                          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                            {item.checklist.orgao && (
+                              <span className="flex items-center gap-1">
+                                <Building2 className="h-3 w-3" /> {item.checklist.orgao}
+                              </span>
                             )}
-                          >
-                            Pontuação: {checklist.pontuacao}
-                          </span>
+                            {item.checklist.valor_total && (
+                              <span className="flex items-center gap-1">
+                                <DollarSign className="h-3 w-3" /> {item.checklist.valor_total}
+                              </span>
+                            )}
+                            <span className="flex items-center gap-1">
+                              <Calendar className="h-3 w-3" />
+                              {format(new Date(created_at), "dd MMM yyyy, HH:mm", { locale: ptBR })}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 mt-1">
+                            {item.checklist.pontuacao !== null && (
+                              <span
+                                className={cn(
+                                  "inline-block text-xs font-semibold px-2 py-0.5 rounded-full",
+                                  item.checklist.pontuacao >= 70 && "bg-success/10 text-success",
+                                  item.checklist.pontuacao >= 40 && item.checklist.pontuacao < 70 && "bg-warning/10 text-warning",
+                                  item.checklist.pontuacao < 40 && "bg-destructive/10 text-destructive"
+                                )}
+                              >
+                                Pontuação: {item.checklist.pontuacao}
+                              </span>
+                            )}
+                            {item.checklist.processedWithPdfMode === true && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                                <FileText className="h-3 w-3" />
+                                Modo PDF
+                              </span>
+                            )}
+                          </div>
+                        </Link>
+                      ) : (
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <p className="font-display font-semibold text-foreground truncate">{file_name}</p>
+                          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                            <span className="flex items-center gap-1">
+                              <Calendar className="h-3 w-3" />
+                              {format(new Date(created_at), "dd MMM yyyy, HH:mm", { locale: ptBR })}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 mt-1">
+                            {item.document.status === "processing" && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Processando
+                              </span>
+                            )}
+                            {item.document.status === "pending" && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border">
+                                Pendente
+                              </span>
+                            )}
+                            {item.document.status === "failed" && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive border border-destructive/20">
+                                <AlertCircle className="h-3 w-3" />
+                                Falhou
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isChecklist && (
+                          <Button size="sm" variant="ghost" asChild>
+                            <Link href={`/historico/${item.checklist.id}`} aria-label="Ver detalhes">
+                              <Eye className="h-4 w-4" />
+                            </Link>
+                          </Button>
                         )}
-                        {checklist.processedWithPdfMode === true && (
-                          <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
-                            <FileText className="h-3 w-3" />
-                            Modo PDF
-                          </span>
+                        {showDelete && (
+                          <Button size="sm" variant="ghost" onClick={(e) => handleDelete(e, item)} aria-label="Excluir">
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
                         )}
                       </div>
-                    </Link>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <Button size="sm" variant="ghost" asChild>
-                        <Link href={`/historico/${checklist.id}`} aria-label="Ver detalhes">
-                          <Eye className="h-4 w-4" />
-                        </Link>
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={(e) => handleDelete(e, checklist.id)} aria-label="Excluir">
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
                     </div>
-                  </div>
-                </motion.div>
-              ))}
+                  </motion.div>
+                );
+              })}
             </div>
           )}
         </motion.div>

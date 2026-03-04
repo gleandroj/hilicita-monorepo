@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Logger,
   Param,
@@ -18,6 +19,12 @@ export class DocumentsController {
   private readonly logger = new Logger(DocumentsController.name);
 
   constructor(private readonly documentsService: DocumentsService) {}
+
+  @Get()
+  async list(@Auth.Session() session: Auth.UserSession) {
+    if (!session?.user?.id) return [];
+    return this.documentsService.findAll(session.user.id);
+  }
 
   @Post('upload')
   @UseInterceptors(FileInterceptor('file'))
@@ -79,5 +86,14 @@ export class DocumentsController {
   ) {
     if (!session?.user?.id) throw new BadRequestException('Unauthorized');
     return this.documentsService.getChecklistForDocument(id, session.user.id);
+  }
+
+  @Delete(':id')
+  async delete(
+    @Param('id') id: string,
+    @Auth.Session() session: Auth.UserSession,
+  ) {
+    if (!session?.user?.id) throw new BadRequestException('Unauthorized');
+    return this.documentsService.delete(id, session.user.id);
   }
 }
