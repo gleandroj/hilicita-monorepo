@@ -43,7 +43,8 @@ services:
     region: oregon
     plan: free
     buildCommand: npm install && cd apps/api && npx prisma generate && cd ../.. && npx turbo run build --filter=api
-    startCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma migrate deploy && node dist/main
+    preDeployCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma db push --schema prisma/schema.prisma
+    startCommand: cd apps/api && node dist/main
     healthCheckPath: /
     domains:
       - api.hilicita.com
