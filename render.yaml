@@ -1,12 +1,11 @@
-# Render Blueprint: hilicita-monorepo (free tier where available)
+# Render Blueprint: hilicita-monorepo (starter/paid tier)
 # Deploys: API (NestJS), Web (Next.js), Worker (Python), MinIO (private), Postgres, Redis (Key Value)
 # After first sync, set in Dashboard: OPENAI_API_KEY, BETTER_AUTH_SECRET, Google SSO (optional), and MinIO MINIO_ROOT_USER if you override default.
-# Note: Render free tier not available for background workers or private services (worker uses free; MinIO uses free + disk).
 
 databases:
   - name: hilicita-db
     databaseName: hilicita
-    plan: free
+    plan: basic-256mb
     region: oregon
 
 services:
@@ -16,7 +15,7 @@ services:
     ipAllowList:
       - source: 0.0.0.0/0
         description: everywhere
-    plan: free
+    plan: starter
     maxmemoryPolicy: noeviction
 
   # MinIO (S3-compatible private storage for PDFs/CSVs). No free plan for pserv; minimal disk for cost.
@@ -41,7 +40,7 @@ services:
     name: api
     runtime: node
     region: oregon
-    plan: free
+    plan: starter
     buildCommand: npm install && cd apps/api && npx prisma generate && cd ../.. && npx turbo run build --filter=api
     preDeployCommand: cd apps/api && npx prisma db execute --file prisma/scripts/enable-pgvector.sql --schema prisma/schema.prisma && npx prisma db push --schema prisma/schema.prisma
     startCommand: cd apps/api && node dist/main
@@ -96,7 +95,7 @@ services:
     name: web
     runtime: node
     region: oregon
-    plan: free
+    plan: starter
     buildCommand: npm install && npx turbo run build --filter=web
     startCommand: cd apps/web && npm run start
     domains:
@@ -107,12 +106,12 @@ services:
       - key: NEXT_PUBLIC_API_URL
         sync: false
 
-  # Background worker (Python). Render has no free plan for workers; uses free by default.
+  # Background worker (Python)
   - type: worker
     name: worker
     runtime: python
     region: oregon
-    plan: free
+    plan: starter
     rootDir: apps/worker
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
