@@ -113,9 +113,10 @@ flowchart TB
 ## 3. Modo PDF como arquivo (`usePdfFile = true`)
 
 1. **Upload**: `_upload_pdf_to_openai(pdf_path, file_name)` → `file_id` (Files API, purpose=user_data).
-2. Para cada um dos 8 blocos em `CHECKLIST_BLOCKS`:
-   - Opcional: `time.sleep(PDF_BLOCK_DELAY_SEC)` entre blocos.
-   - `_generate_one_block_from_pdf_file`: Responses API com `input_file` (file_id) + `input_text` (instrução do bloco), `response_format` = json_schema do bloco.
+2. Para cada um dos 8 blocos em `CHECKLIST_BLOCKS` (por padrão em **paralelo**, até `PDF_BLOCK_CONCURRENCY` ao mesmo tempo):
+   - Se `PDF_BLOCK_CONCURRENCY=1`: execução sequencial; opcional `time.sleep(PDF_BLOCK_DELAY_SEC)` entre blocos.
+   - Se `PDF_BLOCK_CONCURRENCY` > 1: `ThreadPoolExecutor` executa até N blocos em paralelo; resultados são mesclados na ordem dos blocos.
+   - Por bloco: `_generate_one_block_from_pdf_file` → Responses API com `input_file` (file_id) + `input_text`, `response_format` = json_schema do bloco.
    - `_flatten_block_result(block_key, block_data)` → `(flat, evidence)`.
    - Se houver `evidence`, fazer merge em `merged["evidence"]`.
    - `_deep_merge_checklist(merged, flat)`.
@@ -205,7 +206,8 @@ Os blocos usam schemas com **Field** / **BoolField** / **Evidence** (schema v2):
 | `OPENAI_API_KEY`       | Chat, Responses, Embeddings, Files |
 | `OPENAI_CHAT_MODEL`    | Modelo (default: gpt-4o) |
 | `USE_PDF_AS_FILE`      | Default do modo PDF como arquivo |
-| `PDF_BLOCK_DELAY_SEC`  | Atraso entre blocos no modo PDF (ex.: 2.0) |
+| `PDF_BLOCK_CONCURRENCY` | Número de blocos PDF processados em paralelo (default: 3). Use 1 se estourar 429. |
+| `PDF_BLOCK_DELAY_SEC`  | Atraso entre blocos no modo PDF quando sequencial (default: 0). Ex.: 2.0 se 429. |
 | `CHUNK_MIN_CHARS` / `CHUNK_MAX_CHARS` | Tamanho dos chunks (800–1200) |
 | `CHUNK_OVERLAP_CHARS`  | Overlap entre chunks (150) |
 | `TOP_K_RETRIEVAL`      | Chunks por bloco no retrieval (12) |
@@ -217,5 +219,5 @@ Os blocos usam schemas com **Field** / **BoolField** / **Evidence** (schema v2):
 
 ## 10. Resumo dos dois caminhos
 
-1. **PDF como arquivo**: Download → Upload PDF (Files API) → 8 chamadas Responses API (uma por bloco em `CHECKLIST_BLOCKS`) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.
+1. **PDF como arquivo**: Download → Upload PDF (Files API) → até 8 chamadas Responses API em paralelo (por bloco em `CHECKLIST_BLOCKS`, concurrency=`PDF_BLOCK_CONCURRENCY`) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.
 2. **Blocos + retrieval** (modo texto): Download → Partition → Chunks normalizados (800–1200 + overlap) → Embeddings → Por bloco: retrieval (query + section_hint_map, cosine + boost, MMR top_k) → 8 chamadas Chat (uma por bloco) → flatten + merge + evidence → schemaVersion 2, defaults, normalize → insert_checklist → done.

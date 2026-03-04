@@ -22,6 +22,7 @@ import uuid
 import logging
 import tempfile
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import redis
 from unstructured.partition.auto import partition
@@ -127,6 +128,9 @@ HEADING_PATTERNS = [
 # When True, send the PDF as file to OpenAI (Responses API input_file) instead of parsed structured elements.
 # Can be overridden per job via payload "usePdfFile". Requires vision-capable model (e.g. gpt-4o, gpt-4o-mini).
 USE_PDF_AS_FILE = os.environ.get("USE_PDF_AS_FILE", "false").lower() in ("true", "1")
+
+# PDF-as-file: run this many block API calls in parallel (1 = sequential). Increase for speed; reduce to 1 if hitting 429.
+PDF_BLOCK_CONCURRENCY = max(1, int(os.environ.get("PDF_BLOCK_CONCURRENCY", "3")))
 
 # Canonical storage shape (v1-compat: flat values + evidence + requisitos). Used as merge target and for defaults.
 CHECKLIST_JSON_SCHEMA = {
@@ -1336,47 +1340,96 @@ def _generate_one_block_from_pdf_file(
     return data, raw, resp
 
 
+def _run_one_pdf_block(
+    openai_client: OpenAI, file_id: str, index: int, block: dict, file_name: str
+):
+    """Run a single PDF block call; returns (index, name, block_data, raw, resp, error). One of (block_data, raw, resp) or error is set."""
+    name = block["key"]
+    try:
+        block_data, raw, resp = _generate_one_block_from_pdf_file(openai_client, file_id, block, file_name)
+        return (index, name, block_data, raw, resp, None)
+    except Exception as e:
+        return (index, name, {"_error": str(e)}, "", None, e)
+
+
 def generate_checklist_from_pdf_file(
     openai_client: OpenAI, pdf_path: str, file_name: str
 ) -> tuple[dict, dict]:
-    """Send PDF as file to OpenAI Responses API; one call per CHECKLIST_BLOCK, then merge. Returns (checklist dict, debug payload)."""
+    """Send PDF as file to OpenAI Responses API; one call per CHECKLIST_BLOCK (in parallel when PDF_BLOCK_CONCURRENCY > 1), then merge. Returns (checklist dict, debug payload)."""
     logger.info(
-        "Generating checklist from PDF file (blocks): fileName=%s path=%s blocks=%d",
-        file_name or "document", pdf_path, len(CHECKLIST_BLOCKS),
+        "Generating checklist from PDF file (blocks): fileName=%s path=%s blocks=%d concurrency=%d",
+        file_name or "document", pdf_path, len(CHECKLIST_BLOCKS), PDF_BLOCK_CONCURRENCY,
     )
     file_id = _upload_pdf_to_openai(openai_client, pdf_path, file_name or "document.pdf")
     merged = {}
     raw_by_block = {}
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     last_model = CHAT_MODEL
-    # Delay between blocks to stay under TPM/RPM when using gpt-4o or large PDFs.
-    pdf_block_delay_sec = float(os.environ.get("PDF_BLOCK_DELAY_SEC", "2.0"))
-    for i, block in enumerate(CHECKLIST_BLOCKS):
-        if i > 0 and pdf_block_delay_sec > 0:
-            time.sleep(pdf_block_delay_sec)
-        name = block["key"]
-        try:
-            block_data, raw, resp = _generate_one_block_from_pdf_file(openai_client, file_id, block, file_name)
+    pdf_block_delay_sec = float(os.environ.get("PDF_BLOCK_DELAY_SEC", "0"))
+    concurrency = PDF_BLOCK_CONCURRENCY
+
+    if concurrency <= 1:
+        # Sequential: optional delay between blocks (for rate limits).
+        for i, block in enumerate(CHECKLIST_BLOCKS):
+            if i > 0 and pdf_block_delay_sec > 0:
+                time.sleep(pdf_block_delay_sec)
+            idx, name, block_data, raw, resp, err = _run_one_pdf_block(openai_client, file_id, i, block, file_name)
             raw_by_block[name] = {"parsed": block_data, "raw": raw}
-            flat, ev = _flatten_block_result(name, block_data)
-            if ev:
-                merged.setdefault("evidence", {})
-                _deep_merge_checklist(merged["evidence"], ev)
-            _deep_merge_checklist(merged, flat)
-            usage = getattr(resp, "usage", None)
-            if usage:
-                total_usage["prompt_tokens"] += getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
-                total_usage["completion_tokens"] += getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
-                total_usage["total_tokens"] += getattr(usage, "total_tokens", None) or 0
-            last_model = getattr(resp, "model", last_model)
-        except Exception as e:
-            if "input_file" in str(e).lower() or "file" in str(e).lower():
-                logger.warning(
-                    "Responses API with input_file may require a vision model (e.g. gpt-4o). Block %s failed: %s",
-                    name, e,
-                )
-            logger.warning("Block %s failed (PDF file): %s", name, e)
-            raw_by_block[name] = {"parsed": {"_error": str(e)}, "raw": ""}
+            if err:
+                if "input_file" in str(err).lower() or "file" in str(err).lower():
+                    logger.warning(
+                        "Responses API with input_file may require a vision model (e.g. gpt-4o). Block %s failed: %s",
+                        name, err,
+                    )
+                logger.warning("Block %s failed (PDF file): %s", name, err)
+            else:
+                flat, ev = _flatten_block_result(name, block_data)
+                if ev:
+                    merged.setdefault("evidence", {})
+                    _deep_merge_checklist(merged["evidence"], ev)
+                _deep_merge_checklist(merged, flat)
+                if resp:
+                    usage = getattr(resp, "usage", None)
+                    if usage:
+                        total_usage["prompt_tokens"] += getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
+                        total_usage["completion_tokens"] += getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
+                        total_usage["total_tokens"] += getattr(usage, "total_tokens", None) or 0
+                    last_model = getattr(resp, "model", last_model)
+    else:
+        # Parallel: run up to `concurrency` blocks at a time, merge in block order.
+        results_by_index: dict[int, tuple[str, dict, str, object, Exception | None]] = {}
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(_run_one_pdf_block, openai_client, file_id, i, block, file_name): i
+                for i, block in enumerate(CHECKLIST_BLOCKS)
+            }
+            for future in as_completed(futures):
+                idx, name, block_data, raw, resp, err = future.result()
+                results_by_index[idx] = (name, block_data, raw, resp, err)
+        for i in range(len(CHECKLIST_BLOCKS)):
+            name, block_data, raw, resp, err = results_by_index[i]
+            raw_by_block[name] = {"parsed": block_data, "raw": raw}
+            if err:
+                if "input_file" in str(err).lower() or "file" in str(err).lower():
+                    logger.warning(
+                        "Responses API with input_file may require a vision model (e.g. gpt-4o). Block %s failed: %s",
+                        name, err,
+                    )
+                logger.warning("Block %s failed (PDF file): %s", name, err)
+            else:
+                flat, ev = _flatten_block_result(name, block_data)
+                if ev:
+                    merged.setdefault("evidence", {})
+                    _deep_merge_checklist(merged["evidence"], ev)
+                _deep_merge_checklist(merged, flat)
+                if resp:
+                    usage = getattr(resp, "usage", None)
+                    if usage:
+                        total_usage["prompt_tokens"] += getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None) or 0
+                        total_usage["completion_tokens"] += getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None) or 0
+                        total_usage["total_tokens"] += getattr(usage, "total_tokens", None) or 0
+                    last_model = getattr(resp, "model", last_model)
+
     merged.setdefault("schemaVersion", 2)
     _fill_checklist_defaults(merged)
     merged = normalize_checklist_result(merged)
